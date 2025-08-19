@@ -131,6 +131,17 @@ static const char *deny_list[] = {
     "com.fankes.enforcehighrefreshrate",
     "es.chiteroman.bootloaderspoofer",
     "com.hchai.rescueplan",
+    "io.github.chipppppppppp.lime",
+    "dev.device.emulator",
+    "com.github.dan.NoStorageRestrict",
+    "com.android1500.androidfaker",
+    "com.smartpack.kernelmanager",
+    "com.sevtinge.hyperceiler",
+    "ps.reso.instaeclipse",
+    "top.ltfan.notdeveloper",
+    "com.rel.languager",
+    "not.val.cheat",
+    "com.haobammmm",
 };
 #define DENY_LIST_SIZE (sizeof(deny_list)/sizeof(deny_list[0]))
 
