@@ -15,31 +15,33 @@
 #include <linux/spinlock.h>
 #include <asm/uaccess.h>
 
-// -------------------------- APatch专属适配宏（强制规范，确保识别）--------------------------
+// -------------------------- 核心适配宏（规避未定义问题，贴合当前内核）--------------------------
 #define APATCH_COMPATIBLE 1          // 标识APatch兼容模块
-#define PATH_MAX_FIX 4096            // 固定路径缓冲区大小，避免APatch内核定义差异
-#define KPM_LOG_PREFIX "[HMA++_APatch]" // 简化日志前缀，适配APatch日志解析
+#define PATH_MAX_FIX 4096            // 固定路径缓冲区，避免内核定义差异
+#define KPM_LOG_PREFIX "[HMA++_APatch]" // 精简日志前缀，适配APatch日志
+// 移除未定义的VERIFY_READ，直接用内核通用值1
+#define READ_ACCESS_FLAG 1
 
-// -------------------------- 模块基础信息（APatch精简规范，无冗余字符）--------------------------
+// -------------------------- 模块基础信息（APatch精简规范，无解析冲突）--------------------------
 KPM_NAME("HMA++_APatch");
 KPM_VERSION("1.0");
 KPM_LICENSE("GPLv3");
 KPM_AUTHOR("NightFallsLikeRain");
-KPM_DESCRIPTION("Path hide & syscall intercept for APatch"); // 短描述，APatch解析无压力
+KPM_DESCRIPTION("Path hide & syscall intercept for APatch"); // 短描述，无特殊字符
 
-// -------------------------- 核心宏定义（APatch内核精准适配）--------------------------
+// -------------------------- 核心宏定义（精准匹配当前编译环境）--------------------------
 #define TARGET_PATH "/storage/emulated/0/Android/data/"
 #define TARGET_PATH_LEN ((unsigned int)sizeof(TARGET_PATH) - 1)
 #define STATUS_QUERY_MAGIC 0x12345678
 #define MAX_TARGET_NAME_LEN 127
-// APatch标准syscall参数个数（精准匹配APatch hook接口定义）
+// APatch标准syscall参数个数（核心挂钩无冗余）
 #define SYSCALL_MKDIRAT_ARGC 3
 #define SYSCALL_CHDIR_ARGC 1
 #define SYSCALL_UNLINKAT_ARGC 3
 #define SYSCALL_OPENAT_ARGC 4
 #define SYSCALL_GETPID_ARGC 0
 
-// -------------------------- 拦截列表（精简有效，减少加载内存占用）--------------------------
+// -------------------------- 拦截列表（精简有效，降低加载内存占用）--------------------------
 static const char *deny_list[] = {
     "com.silverlab.app.deviceidchanger.free", "me.bingyue.IceCore", "com.modify.installer",
     "o.dyoo", "com.zhufucdev.motion_emulator", "me.simpleHook", "com.cshlolss.vipkill",
@@ -79,15 +81,15 @@ static const char *deny_folder_list[] = {
 };
 #define DENY_FOLDER_SIZE ((unsigned int)sizeof(deny_folder_list)/sizeof(deny_folder_list[0]))
 
-// -------------------------- 全局变量（APatch线程安全初始化）--------------------------
-static int g_module_running = 0;                  // 加载成功后再激活，默认关闭
+// -------------------------- 全局变量（适配当前内核，无未定义宏）--------------------------
+static int g_module_running = 0;                  // 加载成功后激活，默认关闭
 static unsigned long g_intercept_count[6] = {0};  // 拦截计数，初始化清零
-static spinlock_t g_count_lock = __SPIN_LOCK_UNLOCKED; // APatch推荐锁初始化方式
+static spinlock_t g_count_lock;                   // 锁仅声明，初始化移至init函数（规避__SPIN_LOCK_UNLOCKED）
 static const char *op_name_map[] = {              // 无特殊字符，APatch日志兼容
     "mkdirat(创建)", "chdir(进入)", "unlinkat(删除)", "fstatat(查询)", "openat(打开)", "access(访问)"
 };
 
-// -------------------------- 函数原型声明（APatch解析优先，无符号缺失）--------------------------
+// -------------------------- 函数原型声明（无符号缺失，加载优先解析）--------------------------
 static int is_blocked_path(const char *path);
 static int is_hide_target(const char *path);
 static void update_intercept_count(int op_idx);
@@ -97,11 +99,11 @@ static void before_openat(hook_fargs4_t *args, void *udata);
 static void before_mkdirat(hook_fargs4_t *args, void *udata);
 static void before_chdir(hook_fargs4_t *args, void *udata);
 static void before_unlinkat(hook_fargs4_t *args, void *udata);
-static long hma_apatch_init(const char *args, const char *event, void *reserved); // APatch专属初始化函数
+static long hma_apatch_init(const char *args, const char *event, void *reserved);
 static long hma_apatch_exit(void *reserved);
 static void unhook_all_syscalls(void);
 
-// -------------------------- 核心工具函数（APatch安全适配，防内核保护）--------------------------
+// -------------------------- 核心工具函数（适配当前内核接口，无编译报错）--------------------------
 static int is_blocked_path(const char *path) {
     if (!path || *path == '\0') return 0;
     if (strncmp(path, TARGET_PATH, TARGET_PATH_LEN) != 0) return 0;
@@ -150,15 +152,15 @@ static int is_hide_target(const char *path) {
     return 0;
 }
 
+// 关键修复：匹配当前内核spinlock单参数接口，无参数个数报错
 static void update_intercept_count(int op_idx) {
     if (op_idx < 0 || op_idx >= 6) return;
-    unsigned long flags;
-    spin_lock_irqsave(&g_count_lock, flags); // APatch中断安全锁规范
+    unsigned long flags = spin_lock_irqsave(&g_count_lock); // 单参数调用，接收返回的flags
     g_intercept_count[op_idx]++;
-    spin_unlock_irqrestore(&g_count_lock, flags);
+    spin_unlock_irqrestore(&g_count_lock, flags); // 双参数调用，符合接口要求
 }
 
-// 简化日志，减少APatch日志缓冲区压力
+// 精简日志，适配APatch日志缓冲区，无溢出
 static void print_work_status(const char *trigger) {
     if (!trigger) trigger = "unknown";
     pr_info("%s ===== 模块状态（触发：%s）=====\n", KPM_LOG_PREFIX, trigger);
@@ -168,29 +170,26 @@ static void print_work_status(const char *trigger) {
     pr_info("%s ===============================\n", KPM_LOG_PREFIX);
 }
 
-// -------------------------- Syscall钩子函数（APatch精准适配，无异常触发）--------------------------
-// getpid钩子：APatch无侵入适配，仅响应魔术值
+// -------------------------- Syscall钩子函数（移除未定义函数，APatch安全适配）--------------------------
 static void before_getpid(hook_fargs0_t *args, void *udata) {
     if (!g_module_running || !args) return;
     unsigned long magic = syscall_argn(args, 0);
     if (magic == STATUS_QUERY_MAGIC) {
         print_work_status("manual_query");
-        args->ret = 0;                  // APatch要求返回0标识处理成功
-        args->skip_origin = 1;          // 必须后置赋值，符合APatch流程
+        args->ret = 0;          // APatch标准返回值，标识处理成功
+        args->skip_origin = 1;  // 后置赋值，符合APatch流程
     }
 }
 
-// openat钩子：APatch拷贝安全适配，核心隐藏功能
+// 关键修复：移除未定义的access_ok，用kf_strncpy_from_user返回值容错，无编译报错
 static void before_openat(hook_fargs4_t *args, void *udata) {
     if (!g_module_running || !args) return;
     
     const char __user *filename_user = (const char __user *)syscall_argn(args, 1);
-    if (!filename_user || !access_ok(VERIFY_READ, filename_user, 1)) { // APatch用户空间权限校验
-        return;
-    }
+    if (!filename_user) return; // 仅保留空指针校验，规避access_ok未定义
     
     char filename_kernel[PATH_MAX_FIX] = {0};
-    // APatch推荐拷贝逻辑，强化容错
+    // 用内核兼容的kf_strncpy_from_user，返回值<0则拷贝失败，容错可靠
     long len = kf_strncpy_from_user(filename_kernel, filename_user, PATH_MAX_FIX - 1);
     if (len < 0) {
         pr_warn("%s openat copy fail: %ld\n", KPM_LOG_PREFIX, len);
@@ -206,14 +205,11 @@ static void before_openat(hook_fargs4_t *args, void *udata) {
     }
 }
 
-// mkdirat钩子：APatch核心拦截适配
 static void before_mkdirat(hook_fargs4_t *args, void *udata) {
     if (!g_module_running || !args) return;
     
     const char __user *filename_user = (const char __user *)syscall_argn(args, 1);
-    if (!filename_user || !access_ok(VERIFY_READ, filename_user, 1)) {
-        return;
-    }
+    if (!filename_user) return;
     
     char filename_kernel[PATH_MAX_FIX] = {0};
     long len = kf_strncpy_from_user(filename_kernel, filename_user, PATH_MAX_FIX - 1);
@@ -231,14 +227,11 @@ static void before_mkdirat(hook_fargs4_t *args, void *udata) {
     }
 }
 
-// chdir钩子：APatch核心拦截适配
 static void before_chdir(hook_fargs4_t *args, void *udata) {
     if (!g_module_running || !args) return;
     
     const char __user *filename_user = (const char __user *)syscall_argn(args, 0);
-    if (!filename_user || !access_ok(VERIFY_READ, filename_user, 1)) {
-        return;
-    }
+    if (!filename_user) return;
     
     char filename_kernel[PATH_MAX_FIX] = {0};
     long len = kf_strncpy_from_user(filename_kernel, filename_user, PATH_MAX_FIX - 1);
@@ -256,15 +249,12 @@ static void before_chdir(hook_fargs4_t *args, void *udata) {
     }
 }
 
-// unlinkat钩子：APatch核心拦截适配，参数精准匹配
 static void before_unlinkat(hook_fargs4_t *args, void *udata) {
     if (!g_module_running || !args) return;
     
     const char __user *filename_user = (const char __user *)syscall_argn(args, 1);
     int flags = (int)syscall_argn(args, 2);
-    if (!filename_user || !access_ok(VERIFY_READ, filename_user, 1)) {
-        return;
-    }
+    if (!filename_user) return;
     
     char filename_kernel[PATH_MAX_FIX] = {0};
     long len = kf_strncpy_from_user(filename_kernel, filename_user, PATH_MAX_FIX - 1);
@@ -283,8 +273,8 @@ static void before_unlinkat(hook_fargs4_t *args, void *udata) {
 }
 
 // -------------------------- 模块加载/卸载核心逻辑（APatch规范，无残留）--------------------------
-// 解绑所有syscall：APatch要求反向解绑，彻底清理
 static void unhook_all_syscalls(void) {
+    // 反向解绑syscall，符合APatch内存管理，无残留
     unhook_syscalln(__NR_getpid, before_getpid, NULL);
     unhook_syscalln(__NR_openat, before_openat, NULL);
 #if defined(__NR_unlinkat)
@@ -295,28 +285,28 @@ static void unhook_all_syscalls(void) {
     pr_info("%s all syscalls unhooked\n", KPM_LOG_PREFIX);
 }
 
-// APatch专属初始化函数：流程简化，核心优先，回滚彻底
+// 关键修复：spinlock初始化移至init函数，规避__SPIN_LOCK_UNLOCKED未定义
 static long hma_apatch_init(const char *args, const char *event, void *reserved) {
     hook_err_t err;
-    g_module_running = 0; // 未加载完成，禁止处理请求
+    g_module_running = 0;
 
     pr_info("%s start load...\n", KPM_LOG_PREFIX);
+    // 锁初始化移至此处，用内核标准spin_lock_init，无未定义宏报错
+    spin_lock_init(&g_count_lock);
+    memset(g_intercept_count, 0, sizeof(g_intercept_count));
     
-    // 仅挂钩核心syscall（减少APatch加载依赖，提高成功率）
-    // 1. 挂钩mkdirat
+    // 仅挂钩核心syscall，减少APatch加载依赖，提高成功率
     err = hook_syscalln(__NR_mkdirat, SYSCALL_MKDIRAT_ARGC, before_mkdirat, NULL, NULL);
     if (err) { 
         pr_err("%s hook mkdirat fail: %d\n", KPM_LOG_PREFIX, err);
         return -EINVAL; 
     }
-    // 2. 挂钩chdir
     err = hook_syscalln(__NR_chdir, SYSCALL_CHDIR_ARGC, before_chdir, NULL, NULL);
     if (err) { 
         pr_err("%s hook chdir fail: %d\n", KPM_LOG_PREFIX, err);
         unhook_all_syscalls();
         return -EINVAL; 
     }
-    // 3. 挂钩unlinkat
     err = -1;
 #if defined(__NR_unlinkat)
     err = hook_syscalln(__NR_unlinkat, SYSCALL_UNLINKAT_ARGC, before_unlinkat, NULL, NULL);
@@ -330,14 +320,12 @@ static long hma_apatch_init(const char *args, const char *event, void *reserved)
         unhook_all_syscalls();
         return -EINVAL; 
     }
-    // 4. 挂钩openat
     err = hook_syscalln(__NR_openat, SYSCALL_OPENAT_ARGC, before_openat, NULL, NULL);
     if (err) { 
         pr_err("%s hook openat fail: %d\n", KPM_LOG_PREFIX, err);
         unhook_all_syscalls();
         return -EINVAL; 
     }
-    // 5. 挂钩getpid
     err = hook_syscalln(__NR_getpid, SYSCALL_GETPID_ARGC, before_getpid, NULL, NULL);
     if (err) { 
         pr_err("%s hook getpid fail: %d\n", KPM_LOG_PREFIX, err);
@@ -345,14 +333,12 @@ static long hma_apatch_init(const char *args, const char *event, void *reserved)
         return -EINVAL; 
     }
 
-    // 加载成功，激活模块
     g_module_running = 1;
     pr_info("%s load success!\n", KPM_LOG_PREFIX);
     print_work_status("load_done");
-    return 0; // APatch要求返回0标识初始化成功
+    return 0; // APatch要求返回0，标识初始化成功
 }
 
-// APatch专属退出函数：先停止再清理，无内核保护触发
 static long hma_apatch_exit(void *reserved) {
     pr_info("%s start unload...\n", KPM_LOG_PREFIX);
     g_module_running = 0; // 先停止运行，拒绝新请求
@@ -361,7 +347,7 @@ static long hma_apatch_exit(void *reserved) {
 
     print_work_status("unload_before");
     pr_info("%s unload success!\n", KPM_LOG_PREFIX);
-    return 0; // APatch要求返回0标识退出成功
+    return 0; // APatch标准返回值
 }
 
 // -------------------------- APatch模块入口出口（唯一规范，无解析冲突）--------------------------
