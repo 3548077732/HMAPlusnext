@@ -140,6 +140,8 @@ static const char *deny_list[] = {
     "not.val.cheat",
     "com.haobammmm",
     "bin.mt.plus"
+    "com.reveny.nativecheck",
+    "chunqiu.safe.detector",
 };
 #define DENY_LIST_SIZE (sizeof(deny_list)/sizeof(deny_list[0]))
 
