@@ -14,6 +14,7 @@
 #include <linux/kernel.h>
 #include <linux/spinlock.h>
 
+// -------------------------- 模块基础信息（优先定义，适配KPM解析）--------------------------
 KPM_NAME("HMA++ Next");
 KPM_VERSION("1.0");
 KPM_LICENSE("GPLv3");
@@ -25,44 +26,11 @@ KPM_DESCRIPTION("测试更新（新增自定义路径隐藏+工作状态显示�
 #define TARGET_PATH_LEN ((unsigned int)sizeof(TARGET_PATH) - 1)
 #define STATUS_QUERY_MAGIC 0x12345678
 
-// -------------------------- 钩子结构体定义（规范兼容，避免重复）--------------------------
-#ifndef hook_fargs0_t
-typedef struct {
-    unsigned long args[0];
-    long ret;
-    bool skip_origin;
-} hook_fargs0_t;
-#endif
+// -------------------------- 系统调用参数宏（复用头文件定义，避免冲突）--------------------------
+// 移除自定义hook_fargsx_t结构体：头文件hook.h已内置，重复定义导致冲突
+// 移除自定义syscall_argn宏：头文件已包含，避免重复冲突
 
-#ifndef hook_fargs1_t
-typedef struct {
-    unsigned long args[1];
-    long ret;
-    bool skip_origin;
-} hook_fargs1_t;
-#endif
-
-#ifndef hook_fargs2_t
-typedef struct {
-    unsigned long args[2];
-    long ret;
-    bool skip_origin;
-} hook_fargs2_t;
-#endif
-
-#ifndef hook_fargs4_t
-typedef struct {
-    unsigned long args[4];
-    long ret;
-    bool skip_origin;
-} hook_fargs4_t;
-#endif
-
-// -------------------------- 系统调用参数宏（规范适配）--------------------------
-#ifndef syscall_argn
-#define syscall_argn(args, idx) ((args)->args[idx])
-#endif
-
+// -------------------------- 拦截列表定义（语法正确，无冗余逗号）--------------------------
 static const char *deny_list[] = {
     "com.silverlab.app.deviceidchanger.free",
     "me.bingyue.IceCore",
@@ -197,6 +165,7 @@ static const char *deny_folder_list[] = {
 };
 #define DENY_FOLDER_SIZE ((unsigned int)sizeof(deny_folder_list)/sizeof(deny_folder_list[0]))
 
+// -------------------------- 全局变量定义（初始化完整）--------------------------
 static int g_module_running = 0;
 static unsigned long g_intercept_count[6] = {0};
 static spinlock_t g_count_lock;
@@ -204,20 +173,23 @@ static const char *op_name_map[] = {
     "mkdirat(创建)", "chdir(进入)", "unlinkat(删除)", "fstatat(查询)", "openat(打开)", "access(访问)"
 };
 
+// -------------------------- 函数原型声明（避免解析歧义）--------------------------
 static int is_blocked_path(const char *path);
 static int is_hide_target(const char *path);
 static void update_intercept_count(int op_idx);
 static void print_work_status(const char *trigger);
 static void before_getpid(hook_fargs0_t *args, void *udata);
 static void before_openat(hook_fargs4_t *args, void *udata);
-static void before_access(hook_fargs2_t *args, void *udata);
+static void before_access(hook_fargs4_t *args, void *udata); // 适配头文件：hook_fargs2_t=hook_fargs4_t
 static void before_mkdirat(hook_fargs4_t *args, void *udata);
-static void before_chdir(hook_fargs1_t *args, void *udata);
+static void before_chdir(hook_fargs4_t *args, void *udata); // 适配头文件：hook_fargs1_t=hook_fargs4_t
 static void before_rmdir(hook_fargs4_t *args, void *udata);
 static void before_fstatat(hook_fargs4_t *args, void *udata);
 static long mkdir_hook_init(const char *args, const char *event, void *reserved);
 static long mkdir_hook_exit(void *reserved);
 
+// -------------------------- 核心函数实现 --------------------------
+// 原有路径判断函数
 static int is_blocked_path(const char *path) {
     unsigned int prefix_len = strlen(TARGET_PATH);
     if (strncmp(path, TARGET_PATH, prefix_len) != 0) return 0;
@@ -239,7 +211,7 @@ static int is_blocked_path(const char *path) {
     return 0;
 }
 
-
+// 新增路径隐藏判断函数
 static int is_hide_target(const char *path) {
     if (!path || strncmp(path, TARGET_PATH, TARGET_PATH_LEN) != 0) return 0;
     const char *path_after_root = path + TARGET_PATH_LEN;
@@ -261,12 +233,14 @@ static int is_hide_target(const char *path) {
     return 0;
 }
 
+// 计数更新函数
 static void update_intercept_count(int op_idx) {
     spin_lock(&g_count_lock);
     g_intercept_count[op_idx]++;
     spin_unlock(&g_count_lock);
 }
 
+// 状态打印函数
 static void print_work_status(const char *trigger) {
     pr_info("[HMA++]===== 工作状态报告（触发：%s）=====\n", trigger);
     pr_info("[HMA++]模块运行状态：%s\n", g_module_running ? "正常运行" : "已停止");
@@ -290,6 +264,7 @@ static void before_getpid(hook_fargs0_t *args, void *udata) {
     }
 }
 
+// 新增openat钩子（文件打开拦截）
 static void before_openat(hook_fargs4_t *args, void *udata) {
     if (!g_module_running) return;
 
@@ -307,7 +282,8 @@ static void before_openat(hook_fargs4_t *args, void *udata) {
     }
 }
 
-static void before_access(hook_fargs2_t *args, void *udata) {
+// 新增access钩子（路径访问拦截，适配头文件类型）
+static void before_access(hook_fargs4_t *args, void *udata) { // 改为hook_fargs4_t，匹配头文件typedef
     if (!g_module_running) return;
 
     const char __user *filename_user = (const char __user *)syscall_argn(args, 0);
@@ -324,6 +300,7 @@ static void before_access(hook_fargs2_t *args, void *udata) {
     }
 }
 
+// 原有mkdirat钩子
 static void before_mkdirat(hook_fargs4_t *args, void *udata) {
     const char __user *filename_user = (const char __user *)syscall_argn(args, 1);
     char filename_kernel[PATH_MAX];
@@ -339,7 +316,8 @@ static void before_mkdirat(hook_fargs4_t *args, void *udata) {
     }
 }
 
-static void before_chdir(hook_fargs1_t *args, void *udata) {
+// 原有chdir钩子（适配头文件类型）
+static void before_chdir(hook_fargs4_t *args, void *udata) { // 改为hook_fargs4_t，匹配头文件typedef
     const char __user *filename_user = (const char __user *)syscall_argn(args, 0);
     char filename_kernel[PATH_MAX];
     long len = compat_strncpy_from_user(filename_kernel, filename_user, sizeof(filename_kernel) - 1);
@@ -354,6 +332,7 @@ static void before_chdir(hook_fargs1_t *args, void *udata) {
     }
 }
 
+// 原有rmdir钩子
 static void before_rmdir(hook_fargs4_t *args, void *udata) {
     const char __user *filename_user = (const char __user *)syscall_argn(args, 1);
     int flags = (int)syscall_argn(args, 2);
@@ -370,6 +349,7 @@ static void before_rmdir(hook_fargs4_t *args, void *udata) {
     }
 }
 
+// 原有fstatat钩子（适配内核syscall常量）
 static void before_fstatat(hook_fargs4_t *args, void *udata) {
     const char __user *filename_user = (const char __user *)syscall_argn(args, 1);
     char filename_kernel[PATH_MAX];
@@ -385,6 +365,7 @@ static void before_fstatat(hook_fargs4_t *args, void *udata) {
     }
 }
 
+// -------------------------- 模块初始化/退出函数（适配KPM原型）--------------------------
 static long mkdir_hook_init(const char *args, const char *event, void *reserved) {
     hook_err_t err;
     spin_lock_init(&g_count_lock);
@@ -406,7 +387,10 @@ static long mkdir_hook_init(const char *args, const char *event, void *reserved)
 #   error "No suitable syscall for rmdir"
 #endif
     if (err) { pr_err("[HMA++]Hook rmdir/unlinkat failed: %d\n", err); return -EINVAL; }
-#ifdef __NR_newfstatat
+// 适配内核：补充arm64常见fstatat常量，避免无定义报错
+#ifdef __NR_fstatat
+    err = hook_syscalln(__NR_fstatat, 4, before_fstatat, NULL, NULL);
+#elif defined(__NR_newfstatat)
     err = hook_syscalln(__NR_newfstatat, 4, before_fstatat, NULL, NULL);
 #elif defined(__NR_fstatat64)
     err = hook_syscalln(__NR_fstatat64, 4, before_fstatat, NULL, NULL);
@@ -414,9 +398,18 @@ static long mkdir_hook_init(const char *args, const char *event, void *reserved)
 #   error "No suitable syscall for fstatat"
 #endif
     if (err) { pr_err("[HMA++]Hook fstatat failed: %d\n", err); return -EINVAL; }
+    
+    // 新增syscall挂钩
     err = hook_syscalln(__NR_openat, 4, before_openat, NULL, NULL);
     if (err) { pr_err("[HMA++]Hook openat failed: %d\n", err); return -EINVAL; }
+// 适配内核：补充arm64 access syscall常量，避免无定义报错
+#ifdef __NR_access
     err = hook_syscalln(__NR_access, 2, before_access, NULL, NULL);
+#elif defined(__NR_compat_access)
+    err = hook_syscalln(__NR_compat_access, 2, before_access, NULL, NULL);
+#else
+#   error "No suitable syscall for access"
+#endif
     if (err) { pr_err("[HMA++]Hook access failed: %d\n", err); return -EINVAL; }
     err = hook_syscalln(__NR_getpid, 0, before_getpid, NULL, NULL);
     if (err) { pr_err("[HMA++]Hook getpid (status query) failed: %d\n", err); return -EINVAL; }
@@ -426,11 +419,11 @@ static long mkdir_hook_init(const char *args, const char *event, void *reserved)
     return 0;
 }
 
-
 static long mkdir_hook_exit(void *reserved) {
     pr_info("[HMA++]HMA++ exit. Unhooking syscalls...\n");
     g_module_running = 0;
 
+    // 原有syscall解绑
     unhook_syscalln(__NR_mkdirat, before_mkdirat, NULL);
     unhook_syscalln(__NR_chdir, before_chdir, NULL);
 #if defined(__NR_rmdir)
@@ -438,14 +431,21 @@ static long mkdir_hook_exit(void *reserved) {
 #elif defined(__NR_unlinkat)
     unhook_syscalln(__NR_unlinkat, before_rmdir, NULL);
 #endif
-#ifdef __NR_newfstatat
+#ifdef __NR_fstatat
+    unhook_syscalln(__NR_fstatat, before_fstatat, NULL);
+#elif defined(__NR_newfstatat)
     unhook_syscalln(__NR_newfstatat, before_fstatat, NULL);
 #elif defined(__NR_fstatat64)
     unhook_syscalln(__NR_fstatat64, before_fstatat, NULL);
 #endif
     
+    // 新增syscall解绑
     unhook_syscalln(__NR_openat, before_openat, NULL);
+#ifdef __NR_access
     unhook_syscalln(__NR_access, before_access, NULL);
+#elif defined(__NR_compat_access)
+    unhook_syscalln(__NR_compat_access, before_access, NULL);
+#endif
     unhook_syscalln(__NR_getpid, before_getpid, NULL);
 
     pr_info("[HMA++]All syscalls unhooked successfully.\n");
@@ -453,6 +453,6 @@ static long mkdir_hook_exit(void *reserved) {
     return 0;
 }
 
-
+// -------------------------- 模块入口出口（最后定义）--------------------------
 KPM_INIT(mkdir_hook_init);
 KPM_EXIT(mkdir_hook_exit);
