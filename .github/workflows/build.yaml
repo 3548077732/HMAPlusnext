@@ -21,7 +21,7 @@ jobs:
           path: /home/runner/work/HMAPlusPlus/HMAPlusPlus/KernelPatch
 
       - name: test
-        run: ls -R /home/runner/work/HMAPlusPlus/HMAPlusPlus/KernelPatch
+        run: ls -R /home/runner/work/HMAPlusnext/HMAPlusnext/KernelPatch
         
       - name: install deps
         run: sudo apt update && sudo apt install -y build-essential
