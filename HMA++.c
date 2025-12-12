@@ -143,12 +143,12 @@ static int is_hide_target(const char *path) {
     return 0;
 }
 
-// 关键修复：适配当前环境spin_lock_irqsave单参数接口
+// 关键修复：匹配spinlock接口——spin_lock_irqsave单参数返回flags，spin_unlock_irqrestore双参数接收
 static void update_intercept_count(int op_idx) {
-    if (op_idx < 0 || op_idx >= 6) return; // 边界校验
-    spin_lock_irqsave(&g_count_lock); // 匹配头文件单参数声明，自动保存中断状态
+    if (op_idx < 0 || op_idx >= 6) return; // 边界校验，避免越界
+    unsigned long flags = spin_lock_irqsave(&g_count_lock); // 单参数调用，返回保存的中断状态flags
     g_intercept_count[op_idx]++;
-    spin_unlock_irqrestore(&g_count_lock); // 对应解锁接口，自动恢复中断状态
+    spin_unlock_irqrestore(&g_count_lock, flags); // 双参数调用，传入锁+保存的flags，恢复中断状态
 }
 
 static void print_work_status(const char *trigger) {
