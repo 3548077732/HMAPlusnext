@@ -18,7 +18,7 @@ jobs:
         uses: actions/checkout@v5
         with:
           repository: bmax121/KernelPatch
-          path: /home/runner/work/HMAPlusPlus/HMAPlusPlus/KernelPatch
+          path: /home/runner/work/HMAPlusnext/HMAPlusnext/KernelPatch
 
       - name: test
         run: ls -R /home/runner/work/HMAPlusnext/HMAPlusnext/KernelPatch
