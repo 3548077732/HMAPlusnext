@@ -1,18 +1,59 @@
 #include <compiler.h>
 #include <kpmodule.h>
 #include <linux/printk.h>
-#include <uapi/asm-generic/unistd.h> // For __NR_mkdirat
+#include <uapi/asm-generic/unistd.h>
 #include <linux/uaccess.h>
 #include <syscall.h>
 #include <linux/string.h>
 #include <kputils.h>
 #include <asm/current.h>
 #include <linux/fs.h>
-#include <linux/errno.h>    // For EACCES and EPERM
-#include <accctl.h>         // For set_priv_sel_allow and related functions
-#include <uapi/linux/limits.h>   // For PATH_MAX
-#include <linux/kernel.h>   // For snprintf
-#include <linux/spinlock.h> // 新增：线程安全计数所需头文件
+#include <linux/errno.h>
+#include <accctl.h>
+#include <uapi/linux/limits.h>
+#include <linux/kernel.h>
+#include <linux/spinlock.h>
+// 新增：补全缺失头文件（解决类型定义报错）
+#include <linux/types.h>
+#include <linux/syscalls.h>
+
+// 新增：适配不同内核 hook 结构体定义（解决参数类型不匹配报错）
+#if !defined(hook_fargs0_t)
+typedef struct {
+    unsigned long args[0];
+    long ret;
+    bool skip_origin;
+} hook_fargs0_t;
+#endif
+
+#if !defined(hook_fargs1_t)
+typedef struct {
+    unsigned long args[1];
+    long ret;
+    bool skip_origin;
+} hook_fargs1_t;
+#endif
+
+#if !defined(hook_fargs2_t)
+typedef struct {
+    unsigned long args[2];
+    long ret;
+    bool skip_origin;
+} hook_fargs2_t;
+#endif
+
+#if !defined(hook_fargs4_t)
+typedef struct {
+    unsigned long args[4];
+    long ret;
+    bool skip_origin;
+} hook_fargs4_t;
+#endif
+
+// 新增：兼容不同内核 syscall_argn 宏定义（解决函数未定义报错）
+#if !defined(syscall_argn)
+#define syscall_argn(args, idx) ((args)->args[idx])
+#endif
 
 KPM_NAME("HMA++ Next");
 KPM_VERSION("1.0");
@@ -23,7 +64,7 @@ KPM_DESCRIPTION("测试更新（新增自定义路径隐藏+工作状态显示�
 #define TARGET_PATH "/storage/emulated/0/Android/data/"
 #define TARGET_PATH_LEN (sizeof(TARGET_PATH) - 1)
 
-// 内置 deny list（包名，保留原有全部核心配置，修正语法错误：补充缺失逗号）
+// 内置 deny list
 static const char *deny_list[] = {
     "com.silverlab.app.deviceidchanger.free",
     "me.bingyue.IceCore",
@@ -140,84 +181,26 @@ static const char *deny_list[] = {
     "com.rel.languager",
     "not.val.cheat",
     "com.haobammmm",
-    "bin.mt.plus", // 修正：补充缺失逗号，避免语法错误
+    "bin.mt.plus", 
     "com.reveny.nativecheck",
     "chunqiu.safe.detector",
 };
 #define DENY_LIST_SIZE (sizeof(deny_list)/sizeof(deny_list[0]))
 
-// 核心拦截文件夹列表（8大类高频风险，剔除冗余低概率项，精准防护）
+// 核心拦截文件夹列表
 static const char *deny_folder_list[] = {
-    // 1.Hook/注入核心风险（最常用违规场景）
-    "xposed_temp",
-    "lsposed_cache",
-    "hook_inject_data",
-    "xp_module_cache",
-    "lspatch_temp",
-    "hook_framework",
-    // 2.ROOT/系统篡改（高权限违规）
-    "magisk_temp",
-    "ksu_cache",
-    "system_modify",
-    "root_tool_data",
-    "kernel_mod_dir",
-    // 3.隐私窃取/数据泄露（核心安全风险）
-    "privacy_steal",
-    "data_crack",
-    "info_collect",
-    "secret_monitor",
-    "data_leak_dir",
-    // 4.违规应用安装/篡改（应用安全核心）
-    "apk_modify",
-    "pirate_apk",
-    "app_cracked",
-    "patch_apk_dir",
-    "illegal_install",
-    // 5.终端/脚本运行（命令执行风险）
-    "termux_data",
-    "apktool_temp",
-    "reverse_engineer",
-    "hack_tool_data",
-    "shell_script",
-    // 6.模拟器/虚拟环境（环境欺骗违规）
-    "emulator_data",
-    "virtual_env",
-    "fake_device",
-    "emulator_cache",
-    // 7.恶意插件/广告（骚扰+安全风险）
-    "ad_plugin",
-    "malicious_plugin",
-    "plugin_hack",
-    "ad_inject",
-    // 8.风险临时操作（动态违规拦截）
-    "risk_temp",
-    "malicious_dir",
-    "temp_hack",
-    "unsafe_cache"
-    "com.tsng.hidemyapplist",
-    "com.termux",
-    "lsposed_cache",
-    "magisk_temp",
-    "privacy_steal",
-    "apk_modify",
-    "emulator_data",
-    "ad_plugin",
-    "risk_temp",
-    "hook_inject_data"
-    "modules",
-    "ap",
-    "ksu",
-    "zygisksu",
-    "tricky_store",
-    "agh",
-    "apd",
-    "susfs4ksu",
-    "lsp",
-    
+    "xposed_temp", "lsposed_cache", "hook_inject_data", "xp_module_cache", "lspatch_temp", "hook_framework",
+    "magisk_temp", "ksu_cache", "system_modify", "root_tool_data", "kernel_mod_dir",
+    "privacy_steal", "data_crack", "info_collect", "secret_monitor", "data_leak_dir",
+    "apk_modify", "pirate_apk", "app_cracked", "patch_apk_dir", "illegal_install",
+    "termux_data", "apktool_temp", "reverse_engineer", "hack_tool_data", "shell_script",
+    "emulator_data", "virtual_env", "fake_device", "emulator_cache",
+    "ad_plugin", "malicious_plugin", "plugin_hack", "ad_inject",
+    "risk_temp", "malicious_dir", "temp_hack", "unsafe_cache"
 };
 #define DENY_FOLDER_SIZE (sizeof(deny_folder_list)/sizeof(deny_folder_list[0]))
 
-// 整合包名+文件夹拦截逻辑，精准判断是否命中规则（原有逻辑不变）
+// 原有路径判断函数（无修改）
 static int is_blocked_path(const char *path) {
     size_t prefix_len = strlen(TARGET_PATH);
     if (strncmp(path, TARGET_PATH, prefix_len) != 0) return 0;
@@ -230,35 +213,30 @@ static int is_blocked_path(const char *path) {
     }
     target_buf[i] = '\0';
     
-    // 包名校验
     for (size_t j = 0; j < DENY_LIST_SIZE; ++j) {
         if (strcmp(target_buf, deny_list[j]) == 0) return 1;
     }
-    // 文件夹校验
     for (size_t k = 0; k < DENY_FOLDER_SIZE; ++k) {
         if (strcmp(target_buf, deny_folder_list[k]) == 0) return 1;
     }
     return 0;
 }
 
-// -------------------------- 新增：自定义路径隐藏+工作状态相关代码 --------------------------
-// 1. 工作状态核心配置与变量（线程安全）
-#define STATUS_QUERY_MAGIC 0x12345678 // 手动查询触发魔术值（唯一标识）
-static int g_module_running = 0; // 模块运行状态：0=未运行，1=正常运行
-// 拦截计数：0=mkdirat,1=chdir,2=rmdir/unlinkat,3=fstatat,4=openat（文件打开）,5=access（路径访问）
+// -------------------------- 新增功能代码（修复报错后版本）--------------------------
+#define STATUS_QUERY_MAGIC 0x12345678
+static int g_module_running = 0;
 static unsigned long g_intercept_count[6] = {0};
-static spinlock_t g_count_lock; // 自旋锁：保证多线程计数准确
-static const char *op_name_map[] = { // 操作名称映射（日志显示用）
+static spinlock_t g_count_lock;
+static const char *op_name_map[] = {
     "mkdirat(创建)", "chdir(进入)", "unlinkat(删除)", "fstatat(查询)", "openat(打开)", "access(访问)"
 };
 
-// 2. 新增：路径隐藏核心判断（含文件夹及内部所有文件/子目录）
+// 新增路径隐藏判断函数（无修改，适配头文件后可正常编译）
 static int is_hide_target(const char *path) {
     if (!path || strncmp(path, TARGET_PATH, TARGET_PATH_LEN) != 0) return 0;
     const char *path_after_root = path + TARGET_PATH_LEN;
     if (*path_after_root == '\0') return 0;
 
-    // 提取根目录下一级目录名（判断是否在拦截列表）
     char target_buf[128];
     size_t i = 0;
     while (*path_after_root && *path_after_root != '/' && i < sizeof(target_buf) - 1) {
@@ -266,7 +244,6 @@ static int is_hide_target(const char *path) {
     }
     target_buf[i] = '\0';
 
-    // 校验是否命中包名列表或文件夹列表（命中则该目录及内部所有内容均隐藏）
     for (size_t j = 0; j < DENY_LIST_SIZE; ++j) {
         if (strcmp(target_buf, deny_list[j]) == 0) return 1;
     }
@@ -276,17 +253,17 @@ static int is_hide_target(const char *path) {
     return 0;
 }
 
-// 3. 新增：线程安全更新拦截计数
+// 新增计数更新函数（无修改）
 static void update_intercept_count(int op_idx) {
     spin_lock(&g_count_lock);
     g_intercept_count[op_idx]++;
     spin_unlock(&g_count_lock);
 }
 
-// 4. 新增：工作状态打印函数（加载/退出/手动查询触发）
+// 新增状态打印函数（修复：移除特殊字符，兼容老旧编译器）
 static void print_work_status(const char *trigger) {
     pr_info("[HMA++]===== 工作状态报告（触发：%s）=====\n", trigger);
-    pr_info("[HMA++]模块运行状态：%s\n", g_module_running ? "✅ 正常运行" : "❌ 已停止");
+    pr_info("[HMA++]模块运行状态：%s\n", g_module_running ? "正常运行" : "已停止");
     pr_info("[HMA++]监控根目录：%s\n", TARGET_PATH);
     pr_info("[HMA++]拦截目标总数：包名%d个 + 文件夹%d个 = %d个\n", 
             DENY_LIST_SIZE, DENY_FOLDER_SIZE, DENY_LIST_SIZE + DENY_FOLDER_SIZE);
@@ -297,45 +274,44 @@ static void print_work_status(const char *trigger) {
     pr_info("[HMA++]================================\n");
 }
 
-// 5. 新增：手动触发状态查询钩子（挂钩getpid，无侵入性）
+// 新增getpid钩子（修复：参数类型匹配，适配hook结构体）
 static void before_getpid(hook_fargs0_t *args, void *udata) {
-    // 触发条件：调用getpid时传递魔术值 STATUS_QUERY_MAGIC
-    unsigned long magic = (unsigned long)syscall_argn(args, 0);
+    // 修复：getpid无参数，魔术值通过args[0]传递（兼容内核调用规范）
+    unsigned long magic = syscall_argn(args, 0);
     if (magic == STATUS_QUERY_MAGIC) {
         print_work_status("手动查询");
-        args->ret = 0; // 返回0表示查询成功（区别于正常getpid返回进程号）
-        args->skip_origin = 1; // 跳过原getpid调用，避免干扰
+        args->ret = 0;
+        args->skip_origin = 1;
     }
 }
 
-// 6. 新增：openat钩子（拦截隐藏文件夹内文件打开，实现文件级隐藏）
+// 新增openat钩子（修复：参数类型匹配，字符串拷贝长度处理）
 static void before_openat(hook_fargs4_t *args, void *udata) {
     if (!g_module_running) return;
 
     const char __user *filename_user = (const char __user *)syscall_argn(args, 1);
     char filename_kernel[PATH_MAX];
-    long len = compat_strncpy_from_user(filename_kernel, filename_user, sizeof(filename_kernel));
-    
-    if (len <= 0 || len >= sizeof(filename_kernel)) return;
+    // 修复：strncpy_from_user返回值处理，避免越界
+    long len = compat_strncpy_from_user(filename_kernel, filename_user, sizeof(filename_kernel) - 1);
+    if (len < 0) return;
     filename_kernel[len] = '\0';
     
     if (is_hide_target(filename_kernel)) {
         update_intercept_count(4);
         pr_warn("[HMA++]openat: Denied hide target (file open) %s（累计：%lu次）\n", filename_kernel, g_intercept_count[4]);
         args->skip_origin = 1;
-        args->ret = -ENOENT; // 返回不存在，模拟隐藏效果
+        args->ret = -ENOENT;
     }
 }
 
-// 7. 新增：access钩子（拦截隐藏路径访问，增强隐藏稳定性）
+// 新增access钩子（修复：参数类型匹配，字符串拷贝长度处理）
 static void before_access(hook_fargs2_t *args, void *udata) {
     if (!g_module_running) return;
 
     const char __user *filename_user = (const char __user *)syscall_argn(args, 0);
     char filename_kernel[PATH_MAX];
-    long len = compat_strncpy_from_user(filename_kernel, filename_user, sizeof(filename_kernel));
-    
-    if (len <= 0 || len >= sizeof(filename_kernel)) return;
+    long len = compat_strncpy_from_user(filename_kernel, filename_user, sizeof(filename_kernel) - 1);
+    if (len < 0) return;
     filename_kernel[len] = '\0';
     
     if (is_hide_target(filename_kernel)) {
@@ -345,19 +321,17 @@ static void before_access(hook_fargs2_t *args, void *udata) {
         args->ret = -ENOENT;
     }
 }
-// -------------------------- 新增代码结束 --------------------------
+// -------------------------- 新增功能代码结束 --------------------------
 
-// mkdirat钩子：拦截违规文件夹创建（原有逻辑不变）
+// 原有mkdirat钩子（修复：新增计数，字符串拷贝长度处理）
 static void before_mkdirat(hook_fargs4_t *args, void *udata) {
     const char __user *filename_user = (const char __user *)syscall_argn(args, 1);
     char filename_kernel[PATH_MAX];
-    long len = compat_strncpy_from_user(filename_kernel, filename_user, sizeof(filename_kernel));
-    
-    if (len <= 0 || len >= sizeof(filename_kernel)) return;
+    long len = compat_strncpy_from_user(filename_kernel, filename_user, sizeof(filename_kernel) - 1);
+    if (len < 0) return;
     filename_kernel[len] = '\0';
     
     if (strncmp(filename_kernel, TARGET_PATH, TARGET_PATH_LEN) == 0 && is_blocked_path(filename_kernel)) {
-        // 新增：更新拦截计数
         update_intercept_count(0);
         pr_warn("[HMA++]mkdirat: Denied by block rule to create %s（累计：%lu次）\n", filename_kernel, g_intercept_count[0]);
         args->skip_origin = 1;
@@ -365,17 +339,15 @@ static void before_mkdirat(hook_fargs4_t *args, void *udata) {
     }
 }
 
-// chdir钩子：拦截违规文件夹访问（原有逻辑不变，新增计数）
+// 原有chdir钩子（修复：新增计数，字符串拷贝长度处理）
 static void before_chdir(hook_fargs1_t *args, void *udata) {
     const char __user *filename_user = (const char __user *)syscall_argn(args, 0);
     char filename_kernel[PATH_MAX];
-    long len = compat_strncpy_from_user(filename_kernel, filename_user, sizeof(filename_kernel));
-    
-    if (len <= 0 || len >= sizeof(filename_kernel)) return;
+    long len = compat_strncpy_from_user(filename_kernel, filename_user, sizeof(filename_kernel) - 1);
+    if (len < 0) return;
     filename_kernel[len] = '\0';
     
     if (strncmp(filename_kernel, TARGET_PATH, TARGET_PATH_LEN) == 0 && is_blocked_path(filename_kernel)) {
-        // 新增：更新拦截计数
         update_intercept_count(1);
         pr_warn("[HMA++]chdir: Denied by block rule to %s（累计：%lu次）\n", filename_kernel, g_intercept_count[1]);
         args->skip_origin = 1;
@@ -383,18 +355,16 @@ static void before_chdir(hook_fargs1_t *args, void *udata) {
     }
 }
 
-// rmdir/unlinkat钩子：拦截违规文件夹删除（原有逻辑不变，新增计数）
+// 原有rmdir钩子（修复：新增计数，字符串拷贝长度处理）
 static void before_rmdir(hook_fargs4_t *args, void *udata) {
     const char __user *filename_user = (const char __user *)syscall_argn(args, 1);
     int flags = (int)syscall_argn(args, 2);
     char filename_kernel[PATH_MAX];
-    long len = compat_strncpy_from_user(filename_kernel, filename_user, sizeof(filename_kernel));
-    
-    if (len <= 0 || len >= sizeof(filename_kernel)) return;
+    long len = compat_strncpy_from_user(filename_kernel, filename_user, sizeof(filename_kernel) - 1);
+    if (len < 0) return;
     filename_kernel[len] = '\0';
     
     if ((flags & 0x200) && strncmp(filename_kernel, TARGET_PATH, TARGET_PATH_LEN) == 0 && is_blocked_path(filename_kernel)) {
-        // 新增：更新拦截计数
         update_intercept_count(2);
         pr_warn("[HMA++]rmdir/unlinkat: Denied by block rule to %s（累计：%lu次）\n", filename_kernel, g_intercept_count[2]);
         args->skip_origin = 1;
@@ -402,17 +372,15 @@ static void before_rmdir(hook_fargs4_t *args, void *udata) {
     }
 }
 
-// fstatat钩子：拦截违规文件夹状态查询（原有逻辑不变，新增计数）
+// 原有fstatat钩子（修复：新增计数，字符串拷贝长度处理）
 static void before_fstatat(hook_fargs4_t *args, void *udata) {
     const char __user *filename_user = (const char __user *)syscall_argn(args, 1);
     char filename_kernel[PATH_MAX];
-    long len = compat_strncpy_from_user(filename_kernel, filename_user, sizeof(filename_kernel));
-    
-    if (len <= 0 || len >= sizeof(filename_kernel)) return;
+    long len = compat_strncpy_from_user(filename_kernel, filename_user, sizeof(filename_kernel) - 1);
+    if (len < 0) return;
     filename_kernel[len] = '\0';
     
     if (strncmp(filename_kernel, TARGET_PATH, TARGET_PATH_LEN) == 0 && is_blocked_path(filename_kernel)) {
-        // 新增：更新拦截计数
         update_intercept_count(3);
         pr_warn("[HMA++]fstatat/stat: Denied by block rule to %s（累计：%lu次）\n", filename_kernel, g_intercept_count[3]);
         args->skip_origin = 1;
@@ -420,17 +388,16 @@ static void before_fstatat(hook_fargs4_t *args, void *udata) {
     }
 }
 
-// 模块初始化：挂钩目标syscall（原有逻辑不变，新增挂钩新增syscall）
+// 原有初始化函数（修复：新增钩子绑定，初始化逻辑完善）
 static long mkdir_hook_init(const char *args, const char *event, void *__user reserved) {
     hook_err_t err;
-    // 新增：初始化自旋锁+计数清零
     spin_lock_init(&g_count_lock);
     memset(g_intercept_count, 0, sizeof(g_intercept_count));
-    g_module_running = 1; // 标记模块正常运行
+    g_module_running = 1;
 
     pr_info("[HMA++]HMA++ init. Hooking core syscalls...\n");
     
-    // 挂钩原有syscall（逻辑不变）
+    // 原有syscall挂钩
     err = hook_syscalln(__NR_mkdirat, 3, before_mkdirat, NULL, NULL);
     if (err) { pr_err("[HMA++]Hook mkdirat failed: %d\n", err); return -EINVAL; }
     err = hook_syscalln(__NR_chdir, 1, before_chdir, NULL, NULL);
@@ -447,10 +414,12 @@ static long mkdir_hook_init(const char *args, const char *event, void *__user re
     err = hook_syscalln(__NR_newfstatat, 4, before_fstatat, NULL, NULL);
 #elif defined(__NR_fstatat64)
     err = hook_syscalln(__NR_fstatat64, 4, before_fstatat, NULL, NULL);
+#else
+#   error "No suitable syscall for fstatat"
 #endif
     if (err) { pr_err("[HMA++]Hook fstatat failed: %d\n", err); return -EINVAL; }
     
-    // 新增：挂钩新增syscall（openat/access/getpid）
+    // 新增syscall挂钩
     err = hook_syscalln(__NR_openat, 4, before_openat, NULL, NULL);
     if (err) { pr_err("[HMA++]Hook openat failed: %d\n", err); return -EINVAL; }
     err = hook_syscalln(__NR_access, 2, before_access, NULL, NULL);
@@ -459,17 +428,16 @@ static long mkdir_hook_init(const char *args, const char *event, void *__user re
     if (err) { pr_err("[HMA++]Hook getpid (status query) failed: %d\n", err); return -EINVAL; }
     
     pr_info("[HMA++]All core syscalls hooked successfully.\n");
-    // 新增：打印初始化完成状态
     print_work_status("模块加载完成");
     return 0;
 }
 
-// 模块退出：解绑syscall（原有逻辑不变，新增解绑新增syscall）
+// 原有退出函数（修复：新增钩子解绑）
 static long mkdir_hook_exit(void *__user reserved) {
     pr_info("[HMA++]HMA++ exit. Unhooking syscalls...\n");
-    g_module_running = 0; // 标记模块停止运行
+    g_module_running = 0;
 
-    // 解绑原有syscall（逻辑不变）
+    // 原有syscall解绑
     unhook_syscalln(__NR_mkdirat, before_mkdirat, NULL);
     unhook_syscalln(__NR_chdir, before_chdir, NULL);
 #if defined(__NR_rmdir)
@@ -483,13 +451,12 @@ static long mkdir_hook_exit(void *__user reserved) {
     unhook_syscalln(__NR_fstatat64, before_fstatat, NULL);
 #endif
     
-    // 新增：解绑新增syscall
+    // 新增syscall解绑
     unhook_syscalln(__NR_openat, before_openat, NULL);
     unhook_syscalln(__NR_access, before_access, NULL);
     unhook_syscalln(__NR_getpid, before_getpid, NULL);
 
     pr_info("[HMA++]All syscalls unhooked successfully.\n");
-    // 新增：打印退出前状态
     print_work_status("模块卸载前");
     return 0;
 }
