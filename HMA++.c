@@ -14,10 +14,10 @@
 #include <linux/kernel.h>   // For snprintf
 
 KPM_NAME("HMA++");
-KPM_VERSION("0.0.3");
+KPM_VERSION("0.0.6");
 KPM_LICENSE("GPLv3");
-KPM_AUTHOR("lshwjgpt");
-KPM_DESCRIPTION("TG频道:https://t.me/mizhipindao&TG群组:https://t.me/mizhichat");
+KPM_AUTHOR("lshwjgpt and NightFallsLikeRain");
+KPM_DESCRIPTION("测试更新");
 
 #define TARGET_PATH "/storage/emulated/0/Android/data/"
 #define TARGET_PATH_LEN (sizeof(TARGET_PATH) - 1)
@@ -142,6 +142,8 @@ static const char *deny_list[] = {
     "com.rel.languager",
     "not.val.cheat",
     "com.haobammmm",
+    "chunqiu.safe.detector",
+    "com.reveny.nativecheck",
 };
 #define DENY_LIST_SIZE (sizeof(deny_list)/sizeof(deny_list[0]))
 
