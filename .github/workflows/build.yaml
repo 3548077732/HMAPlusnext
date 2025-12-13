@@ -17,7 +17,7 @@ jobs:
       - name: Checkout KernelPatch
         uses: actions/checkout@v5
         with:
-          repository: bmax121/KernelPatch
+          repository: SukiSU-Ultra/SukiSU_KernelPatch_patch
           path: /home/runner/work/HMAPlusnext/HMAPlusnext/KernelPatch
 
       - name: test
