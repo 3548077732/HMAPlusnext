@@ -16,21 +16,15 @@
 
 // -------------------------- 模块基础信息（优先定义，适配KPM解析）--------------------------
 KPM_NAME("HMA++ Next");
-KPM_VERSION("1.0");
+KPM_VERSION("1.0.1");
 KPM_LICENSE("GPLv3");
 KPM_AUTHOR("NightFallsLikeRain");
-KPM_DESCRIPTION("测试更新（新增自定义路径隐藏+工作状态显示）");
+KPM_DESCRIPTION("测试更新");
 
-// -------------------------- 核心宏定义（无冲突，显式类型）--------------------------
 #define TARGET_PATH "/storage/emulated/0/Android/data/"
 #define TARGET_PATH_LEN ((unsigned int)sizeof(TARGET_PATH) - 1)
 #define STATUS_QUERY_MAGIC 0x12345678
 
-// -------------------------- 系统调用参数宏（复用头文件定义，避免冲突）--------------------------
-// 移除自定义hook_fargsx_t结构体：头文件hook.h已内置，重复定义导致冲突
-// 移除自定义syscall_argn宏：头文件已包含，避免重复冲突
-
-// -------------------------- 拦截列表定义（语法正确，无冗余逗号）--------------------------
 static const char *deny_list[] = {
     "com.silverlab.app.deviceidchanger.free",
     "me.bingyue.IceCore",
@@ -150,6 +144,7 @@ static const char *deny_list[] = {
     "bin.mt.plus",
     "com.reveny.nativecheck",
     "chunqiu.safe.detector",
+    "com.tencent.tmgp.dfm",
 };
 #define DENY_LIST_SIZE ((unsigned int)sizeof(deny_list)/sizeof(deny_list[0]))
 
@@ -180,9 +175,9 @@ static void update_intercept_count(int op_idx);
 static void print_work_status(const char *trigger);
 static void before_getpid(hook_fargs0_t *args, void *udata);
 static void before_openat(hook_fargs4_t *args, void *udata);
-static void before_access(hook_fargs4_t *args, void *udata); // 适配头文件：hook_fargs2_t=hook_fargs4_t
+static void before_access(hook_fargs4_t *args, void *udata);
 static void before_mkdirat(hook_fargs4_t *args, void *udata);
-static void before_chdir(hook_fargs4_t *args, void *udata); // 适配头文件：hook_fargs1_t=hook_fargs4_t
+static void before_chdir(hook_fargs4_t *args, void *udata);
 static void before_rmdir(hook_fargs4_t *args, void *udata);
 static void before_fstatat(hook_fargs4_t *args, void *udata);
 static long mkdir_hook_init(const char *args, const char *event, void *reserved);
@@ -283,7 +278,7 @@ static void before_openat(hook_fargs4_t *args, void *udata) {
 }
 
 // 新增access钩子（路径访问拦截，适配头文件类型）
-static void before_access(hook_fargs4_t *args, void *udata) { // 改为hook_fargs4_t，匹配头文件typedef
+static void before_access(hook_fargs4_t *args, void *udata) {
     if (!g_module_running) return;
 
     const char __user *filename_user = (const char __user *)syscall_argn(args, 0);
@@ -317,7 +312,7 @@ static void before_mkdirat(hook_fargs4_t *args, void *udata) {
 }
 
 // 原有chdir钩子（适配头文件类型）
-static void before_chdir(hook_fargs4_t *args, void *udata) { // 改为hook_fargs4_t，匹配头文件typedef
+static void before_chdir(hook_fargs4_t *args, void *udata) {
     const char __user *filename_user = (const char __user *)syscall_argn(args, 0);
     char filename_kernel[PATH_MAX];
     long len = compat_strncpy_from_user(filename_kernel, filename_user, sizeof(filename_kernel) - 1);
@@ -365,7 +360,7 @@ static void before_fstatat(hook_fargs4_t *args, void *udata) {
     }
 }
 
-// -------------------------- 模块初始化/退出函数（适配KPM原型）--------------------------
+// -------------------------- 模块初始化/退出函数（适配KPM原型+无syscall兼容）--------------------------
 static long mkdir_hook_init(const char *args, const char *event, void *reserved) {
     hook_err_t err;
     spin_lock_init(&g_count_lock);
@@ -374,45 +369,61 @@ static long mkdir_hook_init(const char *args, const char *event, void *reserved)
 
     pr_info("[HMA++]HMA++ init. Hooking core syscalls...\n");
     
-    // 原有syscall挂钩
+    // 1. 核心syscall挂钩（必选，保证基础功能）
+    // 挂钩mkdirat
     err = hook_syscalln(__NR_mkdirat, 3, before_mkdirat, NULL, NULL);
     if (err) { pr_err("[HMA++]Hook mkdirat failed: %d\n", err); return -EINVAL; }
+    // 挂钩chdir
     err = hook_syscalln(__NR_chdir, 1, before_chdir, NULL, NULL);
     if (err) { pr_err("[HMA++]Hook chdir failed: %d\n", err); return -EINVAL; }
+    // 挂钩rmdir/unlinkat
 #if defined(__NR_rmdir)
     err = hook_syscalln(__NR_rmdir, 1, before_rmdir, NULL, NULL);
 #elif defined(__NR_unlinkat)
     err = hook_syscalln(__NR_unlinkat, 4, before_rmdir, NULL, NULL);
 #else
-#   error "No suitable syscall for rmdir"
+#   error "No suitable syscall for rmdir/unlinkat (core function)"
 #endif
     if (err) { pr_err("[HMA++]Hook rmdir/unlinkat failed: %d\n", err); return -EINVAL; }
-// 适配内核：补充arm64常见fstatat常量，避免无定义报错
+    // 挂钩openat（核心隐藏文件关键）
+    err = hook_syscalln(__NR_openat, 4, before_openat, NULL, NULL);
+    if (err) { pr_err("[HMA++]Hook openat failed: %d\n", err); return -EINVAL; }
+    // 挂钩getpid（状态查询关键）
+    err = hook_syscalln(__NR_getpid, 0, before_getpid, NULL, NULL);
+    if (err) { pr_err("[HMA++]Hook getpid (status query) failed: %d\n", err); return -EINVAL; }
+
+    // 2. 非核心syscall挂钩（可选，无则跳过，不影响核心功能）
+    // 挂钩fstatat（状态查询拦截，无则打印警告）
+    err = -1;
 #ifdef __NR_fstatat
     err = hook_syscalln(__NR_fstatat, 4, before_fstatat, NULL, NULL);
 #elif defined(__NR_newfstatat)
     err = hook_syscalln(__NR_newfstatat, 4, before_fstatat, NULL, NULL);
 #elif defined(__NR_fstatat64)
     err = hook_syscalln(__NR_fstatat64, 4, before_fstatat, NULL, NULL);
-#else
-#   error "No suitable syscall for fstatat"
+#elif defined(__NR_compat_fstatat64)
+    err = hook_syscalln(__NR_compat_fstatat64, 4, before_fstatat, NULL, NULL);
+#elif defined(__NR_compat_newfstatat)
+    err = hook_syscalln(__NR_compat_newfstatat, 4, before_fstatat, NULL, NULL);
 #endif
-    if (err) { pr_err("[HMA++]Hook fstatat failed: %d\n", err); return -EINVAL; }
-    
-    // 新增syscall挂钩
-    err = hook_syscalln(__NR_openat, 4, before_openat, NULL, NULL);
-    if (err) { pr_err("[HMA++]Hook openat failed: %d\n", err); return -EINVAL; }
-// 适配内核：补充arm64 access syscall常量，避免无定义报错
+    if (err) {
+        pr_warn("[HMA++]Hook fstatat failed (non-core), skip: %d\n", err);
+    }
+
+    // 挂钩access（路径访问拦截，无则打印警告）
+    err = -1;
 #ifdef __NR_access
     err = hook_syscalln(__NR_access, 2, before_access, NULL, NULL);
 #elif defined(__NR_compat_access)
     err = hook_syscalln(__NR_compat_access, 2, before_access, NULL, NULL);
-#else
-#   error "No suitable syscall for access"
+#elif defined(__NR_faccessat)
+    err = hook_syscalln(__NR_faccessat, 4, before_access, NULL, NULL);
+#elif defined(__NR_compat_faccessat)
+    err = hook_syscalln(__NR_compat_faccessat, 4, before_access, NULL, NULL);
 #endif
-    if (err) { pr_err("[HMA++]Hook access failed: %d\n", err); return -EINVAL; }
-    err = hook_syscalln(__NR_getpid, 0, before_getpid, NULL, NULL);
-    if (err) { pr_err("[HMA++]Hook getpid (status query) failed: %d\n", err); return -EINVAL; }
+    if (err) {
+        pr_warn("[HMA++]Hook access failed (non-core), skip: %d\n", err);
+    }
     
     pr_info("[HMA++]All core syscalls hooked successfully.\n");
     print_work_status("模块加载完成");
@@ -423,7 +434,7 @@ static long mkdir_hook_exit(void *reserved) {
     pr_info("[HMA++]HMA++ exit. Unhooking syscalls...\n");
     g_module_running = 0;
 
-    // 原有syscall解绑
+    // 解绑核心syscall
     unhook_syscalln(__NR_mkdirat, before_mkdirat, NULL);
     unhook_syscalln(__NR_chdir, before_chdir, NULL);
 #if defined(__NR_rmdir)
@@ -431,22 +442,31 @@ static long mkdir_hook_exit(void *reserved) {
 #elif defined(__NR_unlinkat)
     unhook_syscalln(__NR_unlinkat, before_rmdir, NULL);
 #endif
+    unhook_syscalln(__NR_openat, before_openat, NULL);
+    unhook_syscalln(__NR_getpid, before_getpid, NULL);
+
+    // 解绑非核心syscall（存在则解绑）
 #ifdef __NR_fstatat
     unhook_syscalln(__NR_fstatat, before_fstatat, NULL);
 #elif defined(__NR_newfstatat)
     unhook_syscalln(__NR_newfstatat, before_fstatat, NULL);
 #elif defined(__NR_fstatat64)
     unhook_syscalln(__NR_fstatat64, before_fstatat, NULL);
+#elif defined(__NR_compat_fstatat64)
+    unhook_syscalln(__NR_compat_fstatat64, before_fstatat, NULL);
+#elif defined(__NR_compat_newfstatat)
+    unhook_syscalln(__NR_compat_newfstatat, before_fstatat, NULL);
 #endif
-    
-    // 新增syscall解绑
-    unhook_syscalln(__NR_openat, before_openat, NULL);
+
 #ifdef __NR_access
     unhook_syscalln(__NR_access, before_access, NULL);
 #elif defined(__NR_compat_access)
     unhook_syscalln(__NR_compat_access, before_access, NULL);
+#elif defined(__NR_faccessat)
+    unhook_syscalln(__NR_faccessat, before_access, NULL);
+#elif defined(__NR_compat_faccessat)
+    unhook_syscalln(__NR_compat_faccessat, before_access, NULL);
 #endif
-    unhook_syscalln(__NR_getpid, before_getpid, NULL);
 
     pr_info("[HMA++]All syscalls unhooked successfully.\n");
     print_work_status("模块卸载前");
