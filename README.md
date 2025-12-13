@@ -1,4 +1,1 @@
-# HMAPlusPlus
-本人因为学业问题没那么多时间维护这个项目，所以就开源了。
-以后有时间再搞,应该还是会更新的。
-欢迎star&PR&fork
+# HMAPlusnext
