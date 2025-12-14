@@ -18,7 +18,7 @@ HMA++.kpm: ${objs}
 	${CC} -r -o $@ $^
 
 %.o: %.c
-	${CC} $(CFLAGS) $(INCLUDE_FLAGS) -c -O2 -o $@ $<
+	${CC} $(CFLAGS) $(INCLUDE_FLAGS) -c -O3 -o $@ $<
 
 .PHONY: clean
 clean:
