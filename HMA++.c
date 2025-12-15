@@ -13,10 +13,10 @@
 
 // 模块元信息（极简核心标识）
 KPM_NAME("HMA++ Next");
-KPM_VERSION("1.0.4");
+KPM_VERSION("1.0.5");
 KPM_LICENSE("GPLv3");
 KPM_AUTHOR("NightFallsLikeRain");
-KPM_DESCRIPTION("极简内核-风险+广告拦截（无冗余依赖）");
+KPM_DESCRIPTION("核心风险拦截测试+广告拦截测试");
 
 // 核心宏定义（精简适配）
 #ifndef AT_REMOVEDIR
