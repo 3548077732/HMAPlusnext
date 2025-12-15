@@ -6,20 +6,16 @@
 #include <syscall.h>
 #include <linux/string.h>
 #include <kputils.h>
-#include <asm/current.h>  // current及current_pid_nr()核心依赖
+#include <asm/current.h>  // 仅保留必需核心头文件
 #include <linux/fs.h>
 #include <linux/errno.h>
 #include <accctl.h>
 #include <uapi/linux/limits.h>
 #include <linux/kernel.h>
-#include <linux/uidgid.h>
 
+// 兜底：手动定义AT_REMOVEDIR常量（标准值0x200，适配所有内核）
 #ifndef AT_REMOVEDIR
 #define AT_REMOVEDIR 0x200
-#endif
-
-#ifndef __kuid_val
-#define __kuid_val(kuid) ((kuid).val)
 #endif
 
 KPM_NAME("HMA++ Next");
@@ -382,7 +378,6 @@ static void before_mkdirat(hook_fargs4_t *args, void *udata) {
     char filename_kernel[PATH_MAX];
     long len = compat_strncpy_from_user(filename_kernel, filename_user, sizeof(filename_kernel));
 
-    // 拷贝失败/路径超长，交给原系统调用处理（加错误日志）
     if (len <= 0 || len >= sizeof(filename_kernel)) {
         pr_warn("[HMA++ Next]mkdirat: Invalid path copy (len: %ld)\n", len);
         return;
@@ -390,10 +385,11 @@ static void before_mkdirat(hook_fargs4_t *args, void *udata) {
     filename_kernel[len] = '\0';
 
     if (is_blocked_path(filename_kernel)) {
+        // 核心优化：强制转换current_uid()为unsigned int，无任何头文件依赖
         pr_warn("[HMA++ Next]mkdirat: Denied [PID:%d, UID:%u] create %s\n", 
-                current_pid_nr(), __kuid_val(current_uid()), filename_kernel);
+                current_pid_nr(), (unsigned int)current_uid(), filename_kernel);
         args->skip_origin = 1;
-        args->ret = -EACCES;  // 创建拦截：权限不足
+        args->ret = -EACCES;
     }
 }
 
@@ -411,9 +407,9 @@ static void before_chdir(hook_fargs1_t *args, void *udata) {
 
     if (is_blocked_path(filename_kernel)) {
         pr_warn("[HMA++ Next]chdir: Denied [PID:%d, UID:%u] access %s\n", 
-                current_pid_nr(), __kuid_val(current_uid()), filename_kernel);
+                current_pid_nr(), (unsigned int)current_uid(), filename_kernel);
         args->skip_origin = 1;
-        args->ret = -ENOENT;  // 访问拦截：路径不存在
+        args->ret = -ENOENT;
     }
 }
 
@@ -433,9 +429,9 @@ static void before_rmdir(hook_fargs1_t *args, void *udata) {
 
     if (is_blocked_path(filename_kernel)) {
         pr_warn("[HMA++ Next]rmdir: Denied [PID:%d, UID:%u] delete %s\n", 
-                current_pid_nr(), __kuid_val(current_uid()), filename_kernel);
+                current_pid_nr(), (unsigned int)current_uid(), filename_kernel);
         args->skip_origin = 1;
-        args->ret = -ENOENT;  // 删除拦截：路径不存在
+        args->ret = -ENOENT;
     }
 }
 #endif
@@ -453,10 +449,9 @@ static void before_unlinkat(hook_fargs4_t *args, void *udata) {
     }
     filename_kernel[len] = '\0';
 
-    // 拦截文件夹删除（AT_REMOVEDIR）或文件删除（无标志）
     if (is_blocked_path(filename_kernel)) {
         pr_warn("[HMA++ Next]unlinkat: Denied [PID:%d, UID:%u] %s %s\n", 
-                current_pid_nr(), __kuid_val(current_uid()), 
+                current_pid_nr(), (unsigned int)current_uid(), 
                 (flags & AT_REMOVEDIR) ? "delete dir" : "delete file", filename_kernel);
         args->skip_origin = 1;
         args->ret = -ENOENT;
@@ -479,7 +474,7 @@ static void before_fstatat(hook_fargs4_t *args, void *udata) {
 
     if (is_blocked_path(filename_kernel)) {
         pr_warn("[HMA++ Next]fstatat: Denied [PID:%d, UID:%u] stat %s\n", 
-                current_pid_nr(), __kuid_val(current_uid()), filename_kernel);
+                current_pid_nr(), (unsigned int)current_uid(), filename_kernel);
         args->skip_origin = 1;
         args->ret = -ENOENT;
     }
@@ -499,10 +494,9 @@ static void before_openat(hook_fargs5_t *args, void *udata) {
     }
     filename_kernel[len] = '\0';
 
-    // 拦截创建文件（O_CREAT）或打开文件
     if (is_blocked_path(filename_kernel)) {
         pr_warn("[HMA++ Next]openat: Denied [PID:%d, UID:%u] %s %s\n", 
-                current_pid_nr(), __kuid_val(current_uid()), 
+                current_pid_nr(), (unsigned int)current_uid(), 
                 (flags & O_CREAT) ? "create file" : "open file", filename_kernel);
         args->skip_origin = 1;
         args->ret = (flags & O_CREAT) ? -EACCES : -ENOENT;
@@ -525,10 +519,9 @@ static void before_renameat(hook_fargs4_t *args, void *udata) {
     oldpath_kernel[len_old] = '\0';
     newpath_kernel[len_new] = '\0';
 
-    // 旧路径在黑名单 或 新路径在黑名单，均拦截
     if (is_blocked_path(oldpath_kernel) || is_blocked_path(newpath_kernel)) {
         pr_warn("[HMA++ Next]renameat: Denied [PID:%d, UID:%u] rename %s -> %s\n", 
-                current_pid_nr(), __kuid_val(current_uid()), oldpath_kernel, newpath_kernel);
+                current_pid_nr(), (unsigned int)current_uid(), oldpath_kernel, newpath_kernel);
         args->skip_origin = 1;
         args->ret = -ENOENT;
     }
@@ -552,7 +545,7 @@ static void before_linkat(hook_fargs4_t *args, void *udata) {
 
     if (is_blocked_path(oldpath_kernel) || is_blocked_path(newpath_kernel)) {
         pr_warn("[HMA++ Next]linkat: Denied [PID:%d, UID:%u] link %s -> %s\n", 
-                current_pid_nr(), __kuid_val(current_uid()), oldpath_kernel, newpath_kernel);
+                current_pid_nr(), (unsigned int)current_uid(), oldpath_kernel, newpath_kernel);
         args->skip_origin = 1;
         args->ret = -EACCES;
     }
@@ -576,7 +569,7 @@ static void before_symlinkat(hook_fargs4_t *args, void *udata) {
 
     if (is_blocked_path(oldpath_kernel) || is_blocked_path(newpath_kernel)) {
         pr_warn("[HMA++ Next]symlinkat: Denied [PID:%d, UID:%u] symlink %s -> %s\n", 
-                current_pid_nr(), __kuid_val(current_uid()), oldpath_kernel, newpath_kernel);
+                current_pid_nr(), (unsigned int)current_uid(), oldpath_kernel, newpath_kernel);
         args->skip_origin = 1;
         args->ret = -EACCES;
     }
@@ -598,7 +591,7 @@ static void before_chmodat(hook_fargs4_t *args, void *udata) {
 
     if (is_blocked_path(filename_kernel)) {
         pr_warn("[HMA++ Next]chmodat: Denied [PID:%d, UID:%u] chmod %s\n", 
-                current_pid_nr(), __kuid_val(current_uid()), filename_kernel);
+                current_pid_nr(), (unsigned int)current_uid(), filename_kernel);
         args->skip_origin = 1;
         args->ret = -ENOENT;
     }
@@ -663,7 +656,7 @@ static long hma_control0(const char *args, char *__user out_msg, int outlen)
     pr_info("kpm hello control0, args: %s\n", args);
     char echo[64] = "echo: ";
     strncat(echo, args, 48);
-    // 补全：判断输出缓冲区长度，防越界拷贝
+    // 防越界拷贝校验
     if (outlen < sizeof(echo)) {
         pr_warn("[HMA++ Next]hma_control0: out_msg len too small (%d < %zu)\n", outlen, sizeof(echo));
         return -EINVAL;
