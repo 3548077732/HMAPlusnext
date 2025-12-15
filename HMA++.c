@@ -12,9 +12,14 @@
 #include <accctl.h>
 #include <uapi/linux/limits.h>
 #include <linux/kernel.h>
+#include <linux/uidgid.h>
 
 #ifndef AT_REMOVEDIR
 #define AT_REMOVEDIR 0x200
+#endif
+
+#ifndef __kuid_val
+#define __kuid_val(kuid) ((kuid).val)
 #endif
 
 KPM_NAME("HMA++ Next");
