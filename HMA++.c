@@ -6,16 +6,13 @@
 #include <syscall.h>
 #include <linux/string.h>
 #include <kputils.h>
-#include <asm/current.h>  // 必需，提供current定义
+#include <asm/current.h>
 #include <linux/fs.h>
 #include <linux/errno.h>
 #include <accctl.h>
 #include <uapi/linux/limits.h>
 #include <linux/kernel.h>
 
-// 1. 前向声明task_struct，解决current->pid访问时结构体未定义错误（C语言通用技巧）
-struct task_struct;
-// 2. 兜底AT_REMOVEDIR常量，适配所有内核
 #ifndef AT_REMOVEDIR
 #define AT_REMOVEDIR 0x200
 #endif
@@ -24,11 +21,11 @@ KPM_NAME("HMA++ Next");
 KPM_VERSION("1.0.4");
 KPM_LICENSE("GPLv3");
 KPM_AUTHOR("NightFallsLikeRain");
-KPM_DESCRIPTION("全场景风险拦截测试");
+KPM_DESCRIPTION("核心风险拦截测试");
 
 #define TARGET_PATH "/storage/emulated/0/Android/data/"
 #define TARGET_PATH_LEN (sizeof(TARGET_PATH) - 1)
-#define MAX_PACKAGE_LEN 1024
+#define MAX_PACKAGE_LEN 512
 
 // 内置 deny list（包名，保留原有全部配置）
 static const char *deny_list[] = {
@@ -387,9 +384,8 @@ static void before_mkdirat(hook_fargs4_t *args, void *udata) {
     filename_kernel[len] = '\0';
 
     if (is_blocked_path(filename_kernel)) {
-        // 终极适配：PID用current->pid（内核最原始通用方式），UID强制转换（无依赖）
-        pr_warn("[HMA++ Next]mkdirat: Denied [PID:%d, UID:%u] create %s\n", 
-                current->pid, (unsigned int)current_uid(), filename_kernel);
+        // 核心优化：删除PID/UID，只保留关键拦截日志，无任何进程信息依赖
+        pr_warn("[HMA++ Next]mkdirat: Denied create %s\n", filename_kernel);
         args->skip_origin = 1;
         args->ret = -EACCES;
     }
@@ -408,8 +404,7 @@ static void before_chdir(hook_fargs1_t *args, void *udata) {
     filename_kernel[len] = '\0';
 
     if (is_blocked_path(filename_kernel)) {
-        pr_warn("[HMA++ Next]chdir: Denied [PID:%d, UID:%u] access %s\n", 
-                current->pid, (unsigned int)current_uid(), filename_kernel);
+        pr_warn("[HMA++ Next]chdir: Denied access %s\n", filename_kernel);
         args->skip_origin = 1;
         args->ret = -ENOENT;
     }
@@ -430,8 +425,7 @@ static void before_rmdir(hook_fargs1_t *args, void *udata) {
     filename_kernel[len] = '\0';
 
     if (is_blocked_path(filename_kernel)) {
-        pr_warn("[HMA++ Next]rmdir: Denied [PID:%d, UID:%u] delete %s\n", 
-                current->pid, (unsigned int)current_uid(), filename_kernel);
+        pr_warn("[HMA++ Next]rmdir: Denied delete %s\n", filename_kernel);
         args->skip_origin = 1;
         args->ret = -ENOENT;
     }
@@ -452,8 +446,7 @@ static void before_unlinkat(hook_fargs4_t *args, void *udata) {
     filename_kernel[len] = '\0';
 
     if (is_blocked_path(filename_kernel)) {
-        pr_warn("[HMA++ Next]unlinkat: Denied [PID:%d, UID:%u] %s %s\n", 
-                current->pid, (unsigned int)current_uid(), 
+        pr_warn("[HMA++ Next]unlinkat: Denied %s %s\n", 
                 (flags & AT_REMOVEDIR) ? "delete dir" : "delete file", filename_kernel);
         args->skip_origin = 1;
         args->ret = -ENOENT;
@@ -475,8 +468,7 @@ static void before_fstatat(hook_fargs4_t *args, void *udata) {
     filename_kernel[len] = '\0';
 
     if (is_blocked_path(filename_kernel)) {
-        pr_warn("[HMA++ Next]fstatat: Denied [PID:%d, UID:%u] stat %s\n", 
-                current->pid, (unsigned int)current_uid(), filename_kernel);
+        pr_warn("[HMA++ Next]fstatat: Denied stat %s\n", filename_kernel);
         args->skip_origin = 1;
         args->ret = -ENOENT;
     }
@@ -497,8 +489,7 @@ static void before_openat(hook_fargs5_t *args, void *udata) {
     filename_kernel[len] = '\0';
 
     if (is_blocked_path(filename_kernel)) {
-        pr_warn("[HMA++ Next]openat: Denied [PID:%d, UID:%u] %s %s\n", 
-                current->pid, (unsigned int)current_uid(), 
+        pr_warn("[HMA++ Next]openat: Denied %s %s\n", 
                 (flags & O_CREAT) ? "create file" : "open file", filename_kernel);
         args->skip_origin = 1;
         args->ret = (flags & O_CREAT) ? -EACCES : -ENOENT;
@@ -522,8 +513,7 @@ static void before_renameat(hook_fargs4_t *args, void *udata) {
     newpath_kernel[len_new] = '\0';
 
     if (is_blocked_path(oldpath_kernel) || is_blocked_path(newpath_kernel)) {
-        pr_warn("[HMA++ Next]renameat: Denied [PID:%d, UID:%u] rename %s -> %s\n", 
-                current->pid, (unsigned int)current_uid(), oldpath_kernel, newpath_kernel);
+        pr_warn("[HMA++ Next]renameat: Denied rename %s -> %s\n", oldpath_kernel, newpath_kernel);
         args->skip_origin = 1;
         args->ret = -ENOENT;
     }
@@ -546,8 +536,7 @@ static void before_linkat(hook_fargs4_t *args, void *udata) {
     newpath_kernel[len_new] = '\0';
 
     if (is_blocked_path(oldpath_kernel) || is_blocked_path(newpath_kernel)) {
-        pr_warn("[HMA++ Next]linkat: Denied [PID:%d, UID:%u] link %s -> %s\n", 
-                current->pid, (unsigned int)current_uid(), oldpath_kernel, newpath_kernel);
+        pr_warn("[HMA++ Next]linkat: Denied link %s -> %s\n", oldpath_kernel, newpath_kernel);
         args->skip_origin = 1;
         args->ret = -EACCES;
     }
@@ -570,8 +559,7 @@ static void before_symlinkat(hook_fargs4_t *args, void *udata) {
     newpath_kernel[len_new] = '\0';
 
     if (is_blocked_path(oldpath_kernel) || is_blocked_path(newpath_kernel)) {
-        pr_warn("[HMA++ Next]symlinkat: Denied [PID:%d, UID:%u] symlink %s -> %s\n", 
-                current->pid, (unsigned int)current_uid(), oldpath_kernel, newpath_kernel);
+        pr_warn("[HMA++ Next]symlinkat: Denied symlink %s -> %s\n", oldpath_kernel, newpath_kernel);
         args->skip_origin = 1;
         args->ret = -EACCES;
     }
@@ -592,8 +580,7 @@ static void before_chmodat(hook_fargs4_t *args, void *udata) {
     filename_kernel[len] = '\0';
 
     if (is_blocked_path(filename_kernel)) {
-        pr_warn("[HMA++ Next]chmodat: Denied [PID:%d, UID:%u] chmod %s\n", 
-                current->pid, (unsigned int)current_uid(), filename_kernel);
+        pr_warn("[HMA++ Next]chmodat: Denied chmod %s\n", filename_kernel);
         args->skip_origin = 1;
         args->ret = -ENOENT;
     }
