@@ -13,6 +13,10 @@
 #include <uapi/linux/limits.h>
 #include <linux/kernel.h>
 
+#ifndef AT_REMOVEDIR
+#define AT_REMOVEDIR 0x200
+#endif
+
 KPM_NAME("HMA++ Next");
 KPM_VERSION("1.0.4");
 KPM_LICENSE("GPLv3");
