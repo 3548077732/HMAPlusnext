@@ -12,17 +12,16 @@
 #include <accctl.h>
 #include <uapi/linux/limits.h>
 #include <linux/kernel.h>
-#include <linux/path.h>    // 新增：路径处理相关
 
 KPM_NAME("HMA++ Next");
 KPM_VERSION("1.0.4");
 KPM_LICENSE("GPLv3");
 KPM_AUTHOR("NightFallsLikeRain");
-KPM_DESCRIPTION("测试更新（全场景风险拦截补全）");
+KPM_DESCRIPTION("全场景风险拦截");
 
 #define TARGET_PATH "/storage/emulated/0/Android/data/"
 #define TARGET_PATH_LEN (sizeof(TARGET_PATH) - 1)
-#define MAX_PACKAGE_LEN 512  // 适配Android最大包名长度（512字节）
+#define MAX_PACKAGE_LEN 1024  // 适配Android最大包名长度（1024字节）
 
 // 内置 deny list（包名，保留原有全部配置）
 static const char *deny_list[] = {
@@ -308,43 +307,20 @@ static const char *deny_folder_list[] = {
     "backup_hack",
     "tool_data",
     "illegal_run",
-    "hack_temp_backup"
+    "hack_temp_backup",
+    "MiShopSkyTreeBundleProvider",
+    "release"
 };
 #define DENY_FOLDER_SIZE (sizeof(deny_folder_list)/sizeof(deny_folder_list[0]))
 
-// 新增：相对路径转绝对路径（防相对路径绕过拦截）
-static int path_to_absolute(const char *path, char *abs_path, size_t abs_len) {
-    struct path pwd_path = current->fs->pwd;
-    char pwd_buf[PATH_MAX];
-    char *pwd_str;
-
-    // 获取当前进程工作目录绝对路径
-    pwd_str = d_path(&pwd_path, pwd_buf, sizeof(pwd_buf));
-    if (IS_ERR(pwd_str)) {
-        pr_err("[HMA++ Next]Failed to get current pwd: %ld\n", PTR_ERR(pwd_str));
-        return -1;
-    }
-
-    // 拼接绝对路径（pwd + path）
-    if (snprintf(abs_path, abs_len, "%s/%s", pwd_str, path) >= abs_len) {
-        pr_warn("[HMA++ Next]Absolute path too long: %s/%s\n", pwd_str, path);
-        return -1;
-    }
-    return 0;
-}
-
-// 优化：整合包名拦截+文件夹拦截，修复截断问题+过滤空串，返回1表示命中拦截规则
+// 核心拦截逻辑：适配低依赖环境，仅校验绝对路径，返回1表示命中拦截
 static int is_blocked_path(const char *path) {
     size_t prefix_len = TARGET_PATH_LEN;
-    char abs_path[PATH_MAX];
     const char *check_path = path;
 
-    // 相对路径转绝对路径
-    if (*path != '/') {
-        if (path_to_absolute(path, abs_path, sizeof(abs_path)) != 0) {
-            return 0;
-        }
-        check_path = abs_path;
+    // 仅拦截绝对路径（低依赖环境放弃相对路径转绝对，避免头文件依赖）
+    if (*check_path != '/') {
+        return 0;
     }
 
     // 非目标路径（/storage/emulated/0/Android/data/）直接放行
@@ -353,7 +329,7 @@ static int is_blocked_path(const char *path) {
     }
     
     const char *target_part = check_path + prefix_len;
-    char target_buf[MAX_PACKAGE_LEN];  // 扩容至512字节，适配长包名
+    char target_buf[MAX_PACKAGE_LEN];
     size_t i = 0;
 
     // 提取路径中目标前缀后的第一个目录名（遇分隔符/长度上限停止）
@@ -370,7 +346,7 @@ static int is_blocked_path(const char *path) {
     // 1. 包名拦截校验（过滤空串，提升性能）
     for (size_t j = 0; j < DENY_LIST_SIZE; ++j) {
         if (deny_list[j][0] == '\0') {
-            continue;  // 跳过空字符串，减少无效比对
+            continue;
         }
         if (strcmp(target_buf, deny_list[j]) == 0) {
             return 1;
@@ -543,34 +519,6 @@ static void before_renameat(hook_fargs4_t *args, void *udata) {
     }
 }
 
-// 新增：getdents64钩子（拦截读取黑名单目录内容）
-static void before_getdents64(hook_fargs3_t *args, void *udata) {
-    int fd = (int)syscall_argn(args, 0);
-    struct file *file = fget(fd);
-    char path_buf[PATH_MAX];
-    char *path_str;
-
-    if (!file) {
-        pr_warn("[HMA++ Next]getdents64: Invalid file descriptor %d\n", fd);
-        return;
-    }
-
-    // 获取文件描述符对应的绝对路径
-    path_str = d_path(&file->f_path, path_buf, sizeof(path_buf));
-    fput(file);  // 释放文件引用
-    if (IS_ERR(path_str)) {
-        pr_err("[HMA++ Next]getdents64: Failed to get path: %ld\n", PTR_ERR(path_str));
-        return;
-    }
-
-    if (is_blocked_path(path_str)) {
-        pr_warn("[HMA++ Next]getdents64: Denied [PID:%d, UID:%d] read dir %s\n", 
-                current->pid, current_uid().val, path_str);
-        args->skip_origin = 1;
-        args->ret = -ENOENT;
-    }
-}
-
 // 新增：linkat钩子（拦截创建指向黑名单路径的硬链接）
 static void before_linkat(hook_fargs4_t *args, void *udata) {
     const char __user *oldpath_user = (const char __user *)syscall_argn(args, 1);
@@ -639,7 +587,7 @@ static void before_chmodat(hook_fargs4_t *args, void *udata) {
     }
 }
 
-// 模块初始化：挂钩所有目标系统调用（新增补全拦截syscall）
+// 模块初始化：挂钩所有目标系统调用（移除getdents64，适配低依赖）
 static long mkdir_hook_init(const char *args, const char *event, void *__user reserved) {
     hook_err_t err;
     pr_info("[HMA++ Next]HMA++ init. Hooking all risk syscalls...\n");
@@ -666,7 +614,7 @@ static long mkdir_hook_init(const char *args, const char *event, void *__user re
     if (err) { pr_err("[HMA++ Next]Hook fstatat64 failed: %d\n", err); return -EINVAL; }
 #endif
 
-    // 新增syscall挂钩（补全风险拦截）
+    // 新增syscall挂钩（补全核心风险拦截，移除getdents64）
 #ifdef __NR_openat
     err = hook_syscalln(__NR_openat, 5, before_openat, NULL, NULL);
     if (err) { pr_err("[HMA++ Next]Hook openat failed: %d\n", err); return -EINVAL; }
@@ -674,10 +622,6 @@ static long mkdir_hook_init(const char *args, const char *event, void *__user re
 #ifdef __NR_renameat
     err = hook_syscalln(__NR_renameat, 4, before_renameat, NULL, NULL);
     if (err) { pr_err("[HMA++ Next]Hook renameat failed: %d\n", err); return -EINVAL; }
-#endif
-#ifdef __NR_getdents64
-    err = hook_syscalln(__NR_getdents64, 3, before_getdents64, NULL, NULL);
-    if (err) { pr_err("[HMA++ Next]Hook getdents64 failed: %d\n", err); return -EINVAL; }
 #endif
 #ifdef __NR_linkat
     err = hook_syscalln(__NR_linkat, 4, before_linkat, NULL, NULL);
@@ -716,7 +660,7 @@ static long hma_control1(void *a1, void *a2, void *a3)
     return 0;
 }
 
-// 模块退出：解绑所有挂钩的系统调用（同步新增syscall解绑）
+// 模块退出：解绑所有挂钩的系统调用（同步移除getdents64解绑）
 static long mkdir_hook_exit(void *__user reserved) {
     pr_info("[HMA++ Next]HMA++ exit. Unhooking all syscalls...\n");
 
@@ -735,15 +679,12 @@ static long mkdir_hook_exit(void *__user reserved) {
     unhook_syscalln(__NR_fstatat64, before_fstatat, NULL);
 #endif
 
-    // 新增syscall解绑
+    // 新增syscall解绑（移除getdents64）
 #ifdef __NR_openat
     unhook_syscalln(__NR_openat, before_openat, NULL);
 #endif
 #ifdef __NR_renameat
     unhook_syscalln(__NR_renameat, before_renameat, NULL);
-#endif
-#ifdef __NR_getdents64
-    unhook_syscalln(__NR_getdents64, before_getdents64, NULL);
 #endif
 #ifdef __NR_linkat
     unhook_syscalln(__NR_linkat, before_linkat, NULL);
