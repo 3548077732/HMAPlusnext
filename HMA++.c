@@ -498,6 +498,6 @@ static long mkdir_hook_exit(void *__user reserved) {
 }
 
 KPM_INIT(mkdir_hook_init);
-KPM_CTL0(hmacontrol0);
+KPM_CTL0(hma_control0);
 KPM_CTL1(hma_control1);
 KPM_EXIT(mkdir_hook_exit);
