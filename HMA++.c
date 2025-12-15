@@ -17,7 +17,7 @@ KPM_NAME("HMA++ Next");
 KPM_VERSION("1.0.4");
 KPM_LICENSE("GPLv3");
 KPM_AUTHOR("NightFallsLikeRain");
-KPM_DESCRIPTION("全场景风险拦截");
+KPM_DESCRIPTION("全场景风险拦截测试");
 
 #define TARGET_PATH "/storage/emulated/0/Android/data/"
 #define TARGET_PATH_LEN (sizeof(TARGET_PATH) - 1)
@@ -318,7 +318,7 @@ static int is_blocked_path(const char *path) {
     size_t prefix_len = TARGET_PATH_LEN;
     const char *check_path = path;
 
-    // 仅拦截绝对路径（低依赖环境放弃相对路径转绝对，避免头文件依赖）
+    // 仅拦截绝对路径（低依赖环境妥协，不影响主流绝对路径风险拦截）
     if (*check_path != '/') {
         return 0;
     }
@@ -408,7 +408,9 @@ static void before_chdir(hook_fargs1_t *args, void *udata) {
     }
 }
 
-// 修复：rmdir钩子（单独处理1参数syscall，避免内存越界）
+// 仅当定义__NR_rmdir时，才定义before_rmdir（避免未使用警告）
+#if defined(__NR_rmdir)
+// rmdir钩子（单独处理1参数syscall，避免内存越界）
 static void before_rmdir(hook_fargs1_t *args, void *udata) {
     const char __user *filename_user = (const char __user *)syscall_argn(args, 0);
     char filename_kernel[PATH_MAX];
@@ -427,6 +429,7 @@ static void before_rmdir(hook_fargs1_t *args, void *udata) {
         args->ret = -ENOENT;  // 删除拦截：路径不存在
     }
 }
+#endif
 
 // 新增：unlinkat钩子（单独处理4参数syscall，区分文件/文件夹删除）
 static void before_unlinkat(hook_fargs4_t *args, void *udata) {
@@ -451,6 +454,8 @@ static void before_unlinkat(hook_fargs4_t *args, void *udata) {
     }
 }
 
+// 仅当定义__NR_newfstatat或__NR_fstatat64时，才定义before_fstatat（避免未使用警告）
+#if defined(__NR_newfstatat) || defined(__NR_fstatat64)
 // fstatat钩子：拦截目标路径下命中规则的文件夹状态查询
 static void before_fstatat(hook_fargs4_t *args, void *udata) {
     const char __user *filename_user = (const char __user *)syscall_argn(args, 1);
@@ -470,6 +475,7 @@ static void before_fstatat(hook_fargs4_t *args, void *udata) {
         args->ret = -ENOENT;
     }
 }
+#endif
 
 // 新增：openat钩子（拦截黑名单路径下文件创建/打开）
 static void before_openat(hook_fargs5_t *args, void *udata) {
@@ -567,7 +573,9 @@ static void before_symlinkat(hook_fargs4_t *args, void *udata) {
     }
 }
 
-// 新增：chmodat钩子（拦截修改黑名单路径下权限）
+// 仅当定义__NR_chmodat时，才定义before_chmodat（避免未使用警告）
+#if defined(__NR_chmodat)
+// chmodat钩子（拦截修改黑名单路径下权限）
 static void before_chmodat(hook_fargs4_t *args, void *udata) {
     const char __user *filename_user = (const char __user *)syscall_argn(args, 1);
     char filename_kernel[PATH_MAX];
@@ -586,8 +594,9 @@ static void before_chmodat(hook_fargs4_t *args, void *udata) {
         args->ret = -ENOENT;
     }
 }
+#endif
 
-// 模块初始化：挂钩所有目标系统调用（移除getdents64，适配低依赖）
+// 模块初始化：挂钩所有目标系统调用（与函数定义强绑定）
 static long mkdir_hook_init(const char *args, const char *event, void *__user reserved) {
     hook_err_t err;
     pr_info("[HMA++ Next]HMA++ init. Hooking all risk syscalls...\n");
@@ -597,7 +606,7 @@ static long mkdir_hook_init(const char *args, const char *event, void *__user re
     if (err) { pr_err("[HMA++ Next]Hook mkdirat failed: %d\n", err); return -EINVAL; }
     err = hook_syscalln(__NR_chdir, 1, before_chdir, NULL, NULL);
     if (err) { pr_err("[HMA++ Next]Hook chdir failed: %d\n", err); return -EINVAL; }
-    // 修复：分开挂钩rmdir和unlinkat
+    // 分开挂钩rmdir和unlinkat（与函数定义强绑定）
 #if defined(__NR_rmdir)
     err = hook_syscalln(__NR_rmdir, 1, before_rmdir, NULL, NULL);
     if (err) { pr_err("[HMA++ Next]Hook rmdir failed: %d\n", err); return -EINVAL; }
@@ -614,7 +623,7 @@ static long mkdir_hook_init(const char *args, const char *event, void *__user re
     if (err) { pr_err("[HMA++ Next]Hook fstatat64 failed: %d\n", err); return -EINVAL; }
 #endif
 
-    // 新增syscall挂钩（补全核心风险拦截，移除getdents64）
+    // 新增syscall挂钩（与函数定义强绑定）
 #ifdef __NR_openat
     err = hook_syscalln(__NR_openat, 5, before_openat, NULL, NULL);
     if (err) { pr_err("[HMA++ Next]Hook openat failed: %d\n", err); return -EINVAL; }
@@ -660,7 +669,7 @@ static long hma_control1(void *a1, void *a2, void *a3)
     return 0;
 }
 
-// 模块退出：解绑所有挂钩的系统调用（同步移除getdents64解绑）
+// 模块退出：解绑所有挂钩的系统调用（与初始化挂钩强绑定）
 static long mkdir_hook_exit(void *__user reserved) {
     pr_info("[HMA++ Next]HMA++ exit. Unhooking all syscalls...\n");
 
@@ -679,7 +688,7 @@ static long mkdir_hook_exit(void *__user reserved) {
     unhook_syscalln(__NR_fstatat64, before_fstatat, NULL);
 #endif
 
-    // 新增syscall解绑（移除getdents64）
+    // 新增syscall解绑
 #ifdef __NR_openat
     unhook_syscalln(__NR_openat, before_openat, NULL);
 #endif
