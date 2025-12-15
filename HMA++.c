@@ -6,31 +6,30 @@
 #include <syscall.h>
 #include <linux/string.h>
 #include <kputils.h>
-#include <asm/current.h>
 #include <linux/fs.h>
 #include <linux/errno.h>
 #include <uapi/linux/limits.h>
 #include <linux/kernel.h>
 
-// 模块元信息（极简保留核心标识）
+// 模块元信息（极简核心标识）
 KPM_NAME("HMA++ Next");
-KPM_VERSION("1.0.5");
+KPM_VERSION("1.0.4");
 KPM_LICENSE("GPLv3");
 KPM_AUTHOR("NightFallsLikeRain");
-KPM_DESCRIPTION("核心风险拦截测试+内核级别广告拦截");
+KPM_DESCRIPTION("极简内核-风险+广告拦截（无冗余依赖）");
 
-// 核心宏定义（精简冗余，适配极简内存）
+// 核心宏定义（精简适配）
 #ifndef AT_REMOVEDIR
 #define AT_REMOVEDIR 0x200
 #endif
 #define TARGET_PATH "/storage/emulated/0/Android/data/"
 #define TARGET_PATH_LEN (sizeof(TARGET_PATH)-1)
-#define MAX_PACKAGE_LEN 256 // 精简包名长度（够用且省内存）
+#define MAX_PACKAGE_LEN 256
 
-// 全局核心开关（唯一全局变量，极简资源占用）
+// 全局核心开关（唯一全局变量）
 static bool hma_running = true;
 
-// 1.风险拦截黑名单（剔除所有空项，减少循环开销）
+// 1.风险拦截黑名单（无空项，精简高效）
 static const char *deny_list[] = {
     "com.silverlab.app.deviceidchanger.free",
     "me.bingyue.IceCore",
@@ -161,84 +160,67 @@ static const char *deny_folder_list[] = {
 };
 #define DENY_FOLDER_SIZE (sizeof(deny_folder_list)/sizeof(deny_folder_list[0]))
 
-// 2.广告拦截黑名单（剔除网络域名，仅保留进程+文件，无socket依赖）
-static const char *ad_package_list[] = {
-    // 主流广告SDK
-    "com.google.android.gms.ads", "com.bytedance.sdk.openadsdk", "com.baidu.mobads",
-    "com.tencent.ads", "com.miui.ads", "com.huawei.hms.ads", "com.oppo.ads", "com.vivo.ads"
-};
-#define AD_PACKAGE_SIZE (sizeof(ad_package_list)/sizeof(ad_package_list[0]))
-
+// 2.广告拦截黑名单（仅文件关键词，无进程依赖）
 static const char *ad_file_keywords[] = {
-    // 广告资源核心关键词
-    "ad_", "_ad.", "ads_", "_ads.", "advertise", "adcache", "adimg", "advideo"
+    "ad_", "_ad.", "ads_", "_ads.", "advertise", "adcache", "adimg", "advideo",
+    "adbanner", "adpopup", "adpush", "adconfig", "adlog", "adstat"
 };
 #define AD_FILE_KEYWORD_SIZE (sizeof(ad_file_keywords)/sizeof(ad_file_keywords[0]))
 
-// 极简辅助函数（无冗余，适配内核接口）
-// 字符串转小写（极简实现）
-static void str_to_lower(char *str) {
-    if (!str) return;
-    for (; *str; str++) if (*str >= 'A' && *str <= 'Z') *str += 32;
-}
-
-// 获取当前进程包名（极简适配，仅保留主流内核支持项）
-static const char *get_current_app_package(void) {
-    struct task_struct *task = current;
-    // 主流适配+兜底，减少内核结构依赖
-    if (task && task->mm && task->mm->context.package_name)
-        return task->mm->context.package_name;
-    return task ? task->comm : NULL;
-}
-
-// 核心判断函数（剔除网络校验，无socket依赖）
+// 核心判断函数（无任何结构体依赖）
 // 风险路径判断
 static int is_blocked_path(const char *path) {
-    if (*path != '/' || strncmp(path, TARGET_PATH, TARGET_PATH_LEN)) return 0;
+    // 仅拦截绝对目标路径
+    if (*path != '/' || strncmp(path, TARGET_PATH, TARGET_PATH_LEN) != 0)
+        return 0;
     
     char target_buf[MAX_PACKAGE_LEN] = {0};
     const char *p = path + TARGET_PATH_LEN;
     size_t i = 0;
-    while (*p && *p != '/' && i < MAX_PACKAGE_LEN-1) target_buf[i++] = *p++;
-    
+    // 提取目标前缀后首个目录名
+    while (*p && *p != '/' && i < MAX_PACKAGE_LEN - 1) {
+        target_buf[i++] = *p++;
+    }
     if (i == 0) return 0;
+
     // 风险包名校验
-    for (size_t j = 0; j < DENY_LIST_SIZE; j++)
-        if (!strcmp(target_buf, deny_list[j])) return 1;
+    for (size_t j = 0; j < DENY_LIST_SIZE; j++) {
+        if (strcmp(target_buf, deny_list[j]) == 0)
+            return 1;
+    }
     // 风险文件夹校验
-    for (size_t k = 0; k < DENY_FOLDER_SIZE; k++)
-        if (!strcmp(target_buf, deny_folder_list[k])) return 1;
+    for (size_t k = 0; k < DENY_FOLDER_SIZE; k++) {
+        if (strcmp(target_buf, deny_folder_list[k]) == 0)
+            return 1;
+    }
     return 0;
 }
 
-// 广告拦截判断（剔除网络校验，仅保留进程+文件，无socket依赖）
+// 广告拦截判断（仅文件关键词，无进程/网络依赖）
 static int is_ad_blocked(const char *path) {
-    // 广告进程校验
-    const char *pkg = get_current_app_package();
-    if (pkg) {
-        char lower[256];
-        strncpy(lower, pkg, 255);
-        str_to_lower(lower);
-        for (size_t i = 0; i < AD_PACKAGE_SIZE; i++)
-            if (strstr(lower, ad_package_list[i])) return 1;
+    if (!path) return 0;
+    char lower_path[PATH_MAX];
+    // 路径拷贝+防越界
+    strncpy(lower_path, path, PATH_MAX - 1);
+    lower_path[PATH_MAX - 1] = '\0';
+    // 转小写（极简实现，无辅助函数）
+    for (char *s = lower_path; *s; s++) {
+        if (*s >= 'A' && *s <= 'Z')
+            *s += 32;
     }
-    // 广告文件校验
-    if (path) {
-        char lower[PATH_MAX];
-        strncpy(lower, path, PATH_MAX-1);
-        str_to_lower(lower);
-        for (size_t i = 0; i < AD_FILE_KEYWORD_SIZE; i++)
-            if (strstr(lower, ad_file_keywords[i])) return 1;
+    // 广告文件关键词匹配
+    for (size_t i = 0; i < AD_FILE_KEYWORD_SIZE; i++) {
+        if (strstr(lower_path, ad_file_keywords[i]) != NULL)
+            return 1;
     }
     return 0;
 }
 
-// 极简钩子函数（核心拦截，无冗余日志，无网络钩子）
-// 文件操作钩子
+// 极简文件操作钩子（核心拦截逻辑）
 static void before_mkdirat(hook_fargs4_t *args, void *udata) {
     if (!hma_running) return;
     char path[PATH_MAX];
-    long len = compat_strncpy_from_user(path, (void*)syscall_argn(args,1), PATH_MAX-1);
+    long len = compat_strncpy_from_user(path, (void *)syscall_argn(args, 1), PATH_MAX - 1);
     if (len <= 0) return;
     path[len] = '\0';
     if (is_blocked_path(path) || is_ad_blocked(path)) {
@@ -251,7 +233,7 @@ static void before_mkdirat(hook_fargs4_t *args, void *udata) {
 static void before_chdir(hook_fargs1_t *args, void *udata) {
     if (!hma_running) return;
     char path[PATH_MAX];
-    long len = compat_strncpy_from_user(path, (void*)syscall_argn(args,0), PATH_MAX-1);
+    long len = compat_strncpy_from_user(path, (void *)syscall_argn(args, 0), PATH_MAX - 1);
     if (len <= 0) return;
     path[len] = '\0';
     if (is_blocked_path(path) || is_ad_blocked(path)) {
@@ -265,7 +247,7 @@ static void before_chdir(hook_fargs1_t *args, void *udata) {
 static void before_rmdir(hook_fargs1_t *args, void *udata) {
     if (!hma_running) return;
     char path[PATH_MAX];
-    long len = compat_strncpy_from_user(path, (void*)syscall_argn(args,0), PATH_MAX-1);
+    long len = compat_strncpy_from_user(path, (void *)syscall_argn(args, 0), PATH_MAX - 1);
     if (len <= 0) return;
     path[len] = '\0';
     if (is_blocked_path(path) || is_ad_blocked(path)) {
@@ -280,7 +262,7 @@ static void before_rmdir(hook_fargs1_t *args, void *udata) {
 static void before_unlinkat(hook_fargs4_t *args, void *udata) {
     if (!hma_running) return;
     char path[PATH_MAX];
-    long len = compat_strncpy_from_user(path, (void*)syscall_argn(args,1), PATH_MAX-1);
+    long len = compat_strncpy_from_user(path, (void *)syscall_argn(args, 1), PATH_MAX - 1);
     if (len <= 0) return;
     path[len] = '\0';
     if (is_blocked_path(path) || is_ad_blocked(path)) {
@@ -295,7 +277,7 @@ static void before_unlinkat(hook_fargs4_t *args, void *udata) {
 static void before_openat(hook_fargs5_t *args, void *udata) {
     if (!hma_running) return;
     char path[PATH_MAX];
-    long len = compat_strncpy_from_user(path, (void*)syscall_argn(args,1), PATH_MAX-1);
+    long len = compat_strncpy_from_user(path, (void *)syscall_argn(args, 1), PATH_MAX - 1);
     if (len <= 0) return;
     path[len] = '\0';
     if (is_blocked_path(path) || is_ad_blocked(path)) {
@@ -309,29 +291,30 @@ static void before_openat(hook_fargs5_t *args, void *udata) {
 #ifdef __NR_renameat
 static void before_renameat(hook_fargs4_t *args, void *udata) {
     if (!hma_running) return;
-    char old[PATH_MAX], new[PATH_MAX];
-    long lo = compat_strncpy_from_user(old, (void*)syscall_argn(args,1), PATH_MAX-1);
-    long ln = compat_strncpy_from_user(new, (void*)syscall_argn(args,3), PATH_MAX-1);
-    if (lo <= 0 || ln <= 0) return;
-    old[lo] = '\0'; new[ln] = '\0';
-    if (is_blocked_path(old) || is_blocked_path(new) || is_ad_blocked(old) || is_ad_blocked(new)) {
-        pr_warn("[HMA++] renameat deny: %s->%s\n", old, new);
+    char old_path[PATH_MAX], new_path[PATH_MAX];
+    long len_old = compat_strncpy_from_user(old_path, (void *)syscall_argn(args, 1), PATH_MAX - 1);
+    long len_new = compat_strncpy_from_user(new_path, (void *)syscall_argn(args, 3), PATH_MAX - 1);
+    if (len_old <= 0 || len_new <= 0) return;
+    old_path[len_old] = '\0';
+    new_path[len_new] = '\0';
+    if (is_blocked_path(old_path) || is_blocked_path(new_path) || is_ad_blocked(old_path) || is_ad_blocked(new_path)) {
+        pr_warn("[HMA++] renameat deny: %s -> %s\n", old_path, new_path);
         args->skip_origin = 1;
         args->ret = -ENOENT;
     }
 }
 #endif
 
-// 模块生命周期（剔除网络钩子挂钩/解钩，极简适配）
+// 模块生命周期（极简无冗余）
 static long mkdir_hook_init(const char *args, const char *event, void *__user reserved) {
     hook_err_t err;
-    pr_info("[HMA++] init\n");
+    pr_info("[HMA++] init start\n");
 
-    // 仅挂钩文件操作类钩子，无网络依赖
+    // 挂钩核心文件操作syscall
     err = hook_syscalln(__NR_mkdirat, 3, before_mkdirat, NULL, NULL);
-    if (err) { pr_err("[HMA++] hook mkdirat err:%d\n", err); return -EINVAL; }
+    if (err) { pr_err("[HMA++] hook mkdirat err: %d\n", err); return -EINVAL; }
     err = hook_syscalln(__NR_chdir, 1, before_chdir, NULL, NULL);
-    if (err) { pr_err("[HMA++] hook chdir err:%d\n", err); return -EINVAL; }
+    if (err) { pr_err("[HMA++] hook chdir err: %d\n", err); return -EINVAL; }
 #if defined(__NR_rmdir)
     hook_syscalln(__NR_rmdir, 1, before_rmdir, NULL, NULL);
 #endif
@@ -345,29 +328,38 @@ static long mkdir_hook_init(const char *args, const char *event, void *__user re
     hook_syscalln(__NR_renameat, 4, before_renameat, NULL, NULL);
 #endif
 
-    pr_info("[HMA++] init ok\n");
+    pr_info("[HMA++] init success\n");
     return 0;
 }
 
-// 启停控制（极简逻辑，无冗余校验）
+// 启停控制（极简逻辑）
 static long hma_control0(const char *args, char *__user out_msg, int outlen) {
     char msg[32] = {0};
-    if (!args || strlen(args)!=1) {
-        strcpy(msg, "args err: only 0/1");
-        goto out;
+    // 参数校验
+    if (!args || strlen(args) != 1) {
+        strncpy(msg, "args err: only 0/1", sizeof(msg)-1);
+        goto out_copy;
     }
+    // 开关控制
     hma_running = (*args == '1') ? true : false;
-    strcpy(msg, hma_running ? "enabled" : "disabled");
-out:
-    if (outlen >= strlen(msg)+1) compat_copy_to_user(out_msg, msg, strlen(msg)+1);
+    strncpy(msg, hma_running ? "interception enabled" : "interception disabled", sizeof(msg)-1);
+
+out_copy:
+    if (outlen >= strlen(msg) + 1) {
+        compat_copy_to_user(out_msg, msg, strlen(msg) + 1);
+    }
     return 0;
 }
 
-static long hma_control1(void *a1, void *a2, void *a3) { return 0; }
+// 预留控制接口（极简实现）
+static long hma_control1(void *a1, void *a2, void *a3) {
+    return 0;
+}
 
-// 模块退出（剔除网络钩子解钩，极简适配）
+// 模块退出（极简解钩）
 static long mkdir_hook_exit(void *__user reserved) {
-    pr_info("[HMA++] exit\n");
+    pr_info("[HMA++] exit start\n");
+    // 解钩所有挂钩的syscall
     unhook_syscalln(__NR_mkdirat, before_mkdirat, NULL);
     unhook_syscalln(__NR_chdir, before_chdir, NULL);
 #if defined(__NR_rmdir)
@@ -382,10 +374,11 @@ static long mkdir_hook_exit(void *__user reserved) {
 #ifdef __NR_renameat
     unhook_syscalln(__NR_renameat, before_renameat, NULL);
 #endif
+    pr_info("[HMA++] exit success\n");
     return 0;
 }
 
-// 模块注册（极简收尾）
+// 模块注册（符合规范）
 KPM_INIT(mkdir_hook_init);
 KPM_CTL0(hma_control0);
 KPM_CTL1(hma_control1);
