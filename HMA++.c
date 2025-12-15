@@ -12,9 +12,7 @@
 #include <accctl.h>
 #include <uapi/linux/limits.h>
 #include <linux/kernel.h>
-#include <linux/dirent.h>  // 新增：目录读取相关结构
 #include <linux/path.h>    // 新增：路径处理相关
-#include <linux/mount.h>   // 新增：挂载点相关（路径转换用）
 
 KPM_NAME("HMA++ Next");
 KPM_VERSION("1.0.4");
