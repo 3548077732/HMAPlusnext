@@ -25,7 +25,10 @@ KPM_DESCRIPTION("核心风险拦截测试");
 
 #define TARGET_PATH "/storage/emulated/0/Android/data/"
 #define TARGET_PATH_LEN (sizeof(TARGET_PATH) - 1)
-#define MAX_PACKAGE_LEN 512
+#define MAX_PACKAGE_LEN 6666
+
+// 新增：HMA拦截全局开关（默认启动时开启拦截）
+static bool hma_running = true;
 
 // 内置 deny list（包名，保留原有全部配置）
 static const char *deny_list[] = {
@@ -373,6 +376,10 @@ static int is_blocked_path(const char *path) {
 
 // mkdirat钩子：拦截目标路径下命中规则的文件夹创建
 static void before_mkdirat(hook_fargs4_t *args, void *udata) {
+    // 新增：开关关闭时，直接放行原系统调用
+    if (!hma_running) {
+        return;
+    }
     const char __user *filename_user = (const char __user *)syscall_argn(args, 1);
     char filename_kernel[PATH_MAX];
     long len = compat_strncpy_from_user(filename_kernel, filename_user, sizeof(filename_kernel));
@@ -393,6 +400,10 @@ static void before_mkdirat(hook_fargs4_t *args, void *udata) {
 
 // chdir钩子：拦截目标路径下命中规则的文件夹访问
 static void before_chdir(hook_fargs1_t *args, void *udata) {
+    // 新增：开关关闭时，直接放行原系统调用
+    if (!hma_running) {
+        return;
+    }
     const char __user *filename_user = (const char __user *)syscall_argn(args, 0);
     char filename_kernel[PATH_MAX];
     long len = compat_strncpy_from_user(filename_kernel, filename_user, sizeof(filename_kernel));
@@ -414,6 +425,10 @@ static void before_chdir(hook_fargs1_t *args, void *udata) {
 #if defined(__NR_rmdir)
 // rmdir钩子（单独处理1参数syscall，避免内存越界）
 static void before_rmdir(hook_fargs1_t *args, void *udata) {
+    // 新增：开关关闭时，直接放行原系统调用
+    if (!hma_running) {
+        return;
+    }
     const char __user *filename_user = (const char __user *)syscall_argn(args, 0);
     char filename_kernel[PATH_MAX];
     long len = compat_strncpy_from_user(filename_kernel, filename_user, sizeof(filename_kernel));
@@ -434,6 +449,10 @@ static void before_rmdir(hook_fargs1_t *args, void *udata) {
 
 // 新增：unlinkat钩子（单独处理4参数syscall，区分文件/文件夹删除）
 static void before_unlinkat(hook_fargs4_t *args, void *udata) {
+    // 新增：开关关闭时，直接放行原系统调用
+    if (!hma_running) {
+        return;
+    }
     const char __user *filename_user = (const char __user *)syscall_argn(args, 1);
     int flags = (int)syscall_argn(args, 2);
     char filename_kernel[PATH_MAX];
@@ -457,6 +476,10 @@ static void before_unlinkat(hook_fargs4_t *args, void *udata) {
 #if defined(__NR_newfstatat) || defined(__NR_fstatat64)
 // fstatat钩子：拦截目标路径下命中规则的文件夹状态查询
 static void before_fstatat(hook_fargs4_t *args, void *udata) {
+    // 新增：开关关闭时，直接放行原系统调用
+    if (!hma_running) {
+        return;
+    }
     const char __user *filename_user = (const char __user *)syscall_argn(args, 1);
     char filename_kernel[PATH_MAX];
     long len = compat_strncpy_from_user(filename_kernel, filename_user, sizeof(filename_kernel));
@@ -477,6 +500,10 @@ static void before_fstatat(hook_fargs4_t *args, void *udata) {
 
 // 新增：openat钩子（拦截黑名单路径下文件创建/打开）
 static void before_openat(hook_fargs5_t *args, void *udata) {
+    // 新增：开关关闭时，直接放行原系统调用
+    if (!hma_running) {
+        return;
+    }
     const char __user *filename_user = (const char __user *)syscall_argn(args, 1);
     int flags = (int)syscall_argn(args, 2);
     char filename_kernel[PATH_MAX];
@@ -498,6 +525,10 @@ static void before_openat(hook_fargs5_t *args, void *udata) {
 
 // 新增：renameat钩子（拦截进出黑名单路径的移动/重命名）
 static void before_renameat(hook_fargs4_t *args, void *udata) {
+    // 新增：开关关闭时，直接放行原系统调用
+    if (!hma_running) {
+        return;
+    }
     const char __user *oldpath_user = (const char __user *)syscall_argn(args, 1);
     const char __user *newpath_user = (const char __user *)syscall_argn(args, 3);
     char oldpath_kernel[PATH_MAX], newpath_kernel[PATH_MAX];
@@ -521,6 +552,10 @@ static void before_renameat(hook_fargs4_t *args, void *udata) {
 
 // 新增：linkat钩子（拦截创建指向黑名单路径的硬链接）
 static void before_linkat(hook_fargs4_t *args, void *udata) {
+    // 新增：开关关闭时，直接放行原系统调用
+    if (!hma_running) {
+        return;
+    }
     const char __user *oldpath_user = (const char __user *)syscall_argn(args, 1);
     const char __user *newpath_user = (const char __user *)syscall_argn(args, 3);
     char oldpath_kernel[PATH_MAX], newpath_kernel[PATH_MAX];
@@ -544,6 +579,10 @@ static void before_linkat(hook_fargs4_t *args, void *udata) {
 
 // 新增：symlinkat钩子（拦截创建指向黑名单路径的软链接）
 static void before_symlinkat(hook_fargs4_t *args, void *udata) {
+    // 新增：开关关闭时，直接放行原系统调用
+    if (!hma_running) {
+        return;
+    }
     const char __user *oldpath_user = (const char __user *)syscall_argn(args, 1);
     const char __user *newpath_user = (const char __user *)syscall_argn(args, 3);
     char oldpath_kernel[PATH_MAX], newpath_kernel[PATH_MAX];
@@ -569,6 +608,10 @@ static void before_symlinkat(hook_fargs4_t *args, void *udata) {
 #if defined(__NR_chmodat)
 // chmodat钩子（拦截修改黑名单路径下权限）
 static void before_chmodat(hook_fargs4_t *args, void *udata) {
+    // 新增：开关关闭时，直接放行原系统调用
+    if (!hma_running) {
+        return;
+    }
     const char __user *filename_user = (const char __user *)syscall_argn(args, 1);
     char filename_kernel[PATH_MAX];
     long len = compat_strncpy_from_user(filename_kernel, filename_user, sizeof(filename_kernel));
@@ -636,21 +679,46 @@ static long mkdir_hook_init(const char *args, const char *event, void *__user re
     if (err) { pr_err("[HMA++ Next]Hook chmodat failed: %d\n", err); return -EINVAL; }
 #endif
 
-    pr_info("[HMA++ Next]All risk syscalls hooked successfully.\n");
+    pr_info("[HMA++ Next]All risk syscalls hooked successfully. Current status: %s\n", hma_running ? "Enabled" : "Disabled");
     return 0;
 }
 
+// 新增启停控制逻辑：输入1开启拦截，输入0关闭拦截
 static long hma_control0(const char *args, char *__user out_msg, int outlen)
 {
-    pr_info("kpm hello control0, args: %s\n", args);
-    char echo[64] = "echo: ";
-    strncat(echo, args, 48);
-    // 防越界拷贝校验
-    if (outlen < sizeof(echo)) {
-        pr_warn("[HMA++ Next]hma_control0: out_msg len too small (%d < %zu)\n", outlen, sizeof(echo));
+    char msg[64] = {0};
+    // 校验输入参数合法性
+    if (args == NULL || strlen(args) != 1) {
+        snprintf(msg, sizeof(msg)-1, "参数无效！仅支持输入0(关闭拦截)、1(开启拦截)");
+        pr_warn("[HMA++ Next]control0: Invalid args=%s\n", args ? args : "NULL");
+        goto out_copy;
+    }
+
+    // 解析参数并设置开关
+    switch (*args) {
+        case '0':
+            hma_running = false;
+            snprintf(msg, sizeof(msg)-1, "HMA++ Next 已关闭风险拦截");
+            pr_info("[HMA++ Next]control0: Risk interception disabled\n");
+            break;
+        case '1':
+            hma_running = true;
+            snprintf(msg, sizeof(msg)-1, "HMA++ Next 已开启风险拦截");
+            pr_info("[HMA++ Next]control0: Risk interception enabled\n");
+            break;
+        default:
+            snprintf(msg, sizeof(msg)-1, "参数无效！仅支持输入0(关闭拦截)、1(开启拦截)");
+            pr_warn("[HMA++ Next]control0: Invalid args val=%c\n", *args);
+            break;
+    }
+
+out_copy:
+    // 防越界拷贝，确保输出缓冲区足够
+    if (outlen < strlen(msg) + 1) {
+        pr_warn("[HMA++ Next]control0: out_msg len too small (%d < %zu)\n", outlen, strlen(msg)+1);
         return -EINVAL;
     }
-    compat_copy_to_user(out_msg, echo, sizeof(echo));
+    compat_copy_to_user(out_msg, msg, strlen(msg) + 1);
     return 0;
 }
 
