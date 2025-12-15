@@ -14,7 +14,7 @@
 #include <linux/kernel.h>   // For snprintf
 
 KPM_NAME("HMA++ Next");
-KPM_VERSION("1.0.3");
+KPM_VERSION("1.0.4");
 KPM_LICENSE("GPLv3");
 KPM_AUTHOR("NightFallsLikeRain");
 KPM_DESCRIPTION("测试更新");
@@ -29,7 +29,7 @@ static const char *deny_list[] = {
     "com.modify.installer",
     "o.dyoo",
     "com.zhufucdev.motion_emulator",
-    "",
+    "com.xiaomi.shop",
     "",
     "",
     "com.demo.serendipity",
@@ -463,6 +463,21 @@ static long mkdir_hook_init(const char *args, const char *event, void *__user re
     return 0;
 }
 
+static long hma_control0(const char *args, char *__user out_msg, int outlen)
+{
+    pr_info("kpm hello control0, args: %s\n", args);
+    char echo[64] = "echo: ";
+    strncat(echo, args, 48);
+    compat_copy_to_user(out_msg, echo, sizeof(echo));
+    return 0;
+}
+
+static long hma_control1(void *a1, void *a2, void *a3)
+{
+    pr_info("kpm hello control1, a1: %llx, a2: %llx, a3: %llx\n", a1, a2, a3);
+    return 0;
+}
+
 // 模块退出：解绑所有挂钩的系统调用
 static long mkdir_hook_exit(void *__user reserved) {
     pr_info("[HMA++ Next]HMA++ Next exit. Unhooking mkdirat, chdir, rmdir, fstatat...\n");
@@ -483,4 +498,6 @@ static long mkdir_hook_exit(void *__user reserved) {
 }
 
 KPM_INIT(mkdir_hook_init);
+KPM_CTL0(hmacontrol0);
+KPM_CTL1(hma_control1);
 KPM_EXIT(mkdir_hook_exit);
