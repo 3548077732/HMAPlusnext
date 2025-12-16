@@ -16,9 +16,11 @@
 #define __user
 #endif
 
-// 2. 仅声明KPM框架符号（删除kf_xxx重复声明，依赖头文件宏定义）
+// 2. 显式声明依赖符号（弱引用，避免缺失崩溃+解决隐式声明）
 extern hook_err_t hook_syscalln(int nr, int narg, void *before, void *after, void *udata) __attribute__((weak));
 extern void unhook_syscalln(int nr, void *before, void *after) __attribute__((weak));
+// 声明compat_copy_to_user（解决隐式声明，匹配内核原型）
+extern long compat_copy_to_user(void __user *dest, const void *src, unsigned long count) __attribute__((weak));
 
 // 3. 定义syscall号默认值（无此syscall时跳过挂钩）
 #ifndef __NR_mkdirat
@@ -56,10 +58,10 @@ KPM_NAME("HMA++ Next");
 KPM_VERSION("1.0.14");
 KPM_LICENSE("GPLv3");
 KPM_AUTHOR("NightFallsLikeRain");
-KPM_DESCRIPTION("非白名单拦截+核心应用放行");
+KPM_DESCRIPTION("非白名单拦截+核心应用放行（强兼容版）");
 
 // 核心宏定义
-#define MAX_PACKAGE_LEN 512
+#define MAX_PACKAGE_LEN 298
 #define ARG_SEPARATOR ','
 #define PATH_SEPARATOR '/'
 
@@ -132,7 +134,7 @@ static const char *ad_file_keywords[] = {
 };
 #define AD_FILE_KEYWORD_SIZE (sizeof(ad_file_keywords)/sizeof(ad_file_keywords[0]))
 
-// 核心工具函数（直接使用KPM头文件定义的kf_xxx函数）
+// 核心工具函数（使用KPM头文件定义的kf_strncpy_from_user，兼容compat_copy_to_user）
 static int is_app_whitelisted(const char *path) {
     if (!path || *path != PATH_SEPARATOR) return 0;
 
@@ -191,10 +193,11 @@ static int is_ad_blocked(const char *path) {
     return 0;
 }
 
-// 核心拦截钩子（仅保留核心syscall，直接使用kf_xxx函数）
+// 核心拦截钩子（使用kf_strncpy_from_user，确保用户空间数据读取兼容）
 static void __used before_mkdirat(hook_fargs4_t *args, void *udata) {
     if (!hma_running) return;
     char path[PATH_MAX];
+    // 使用KPM提供的kf_strncpy_from_user，头文件已定义
     long len = kf_strncpy_from_user(path, (void *)syscall_argn(args, 1), PATH_MAX - 1);
     if (len <= 0) return;
     path[len] = '\0';
@@ -252,7 +255,7 @@ static long __used mkdir_hook_init(const char *args, const char *event, void *__
     return 0;
 }
 
-// 控制接口（使用KPM头文件定义的kf_copy_to_user）
+// 控制接口（使用compat_copy_to_user，显式声明避免隐式错误）
 static long __used hma_control0(const char *args, char *__user out_msg, int outlen) {
     char msg[64] = "参数错误：使用'0/1,0/1'（全局,广告）";
     if (args && strlen(args) >= 3 && strchr(args, ARG_SEPARATOR)) {
@@ -266,8 +269,9 @@ static long __used hma_control0(const char *args, char *__user out_msg, int outl
         }
     }
 
-    if (outlen >= strlen(msg) + 1) {
-        kf_copy_to_user(out_msg, msg, strlen(msg) + 1);
+    // 检测compat_copy_to_user是否存在，避免空指针调用
+    if (outlen >= strlen(msg) + 1 && compat_copy_to_user) {
+        compat_copy_to_user(out_msg, msg, strlen(msg) + 1);
     }
     return 0;
 }
