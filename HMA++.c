@@ -13,10 +13,10 @@
 
 // 模块元信息
 KPM_NAME("HMA++ Next");
-KPM_VERSION("1.0.9"); // 升级版本号标识兼容修复
+KPM_VERSION("1.0.10"); // 标识警告修复版本
 KPM_LICENSE("GPLv3");
 KPM_AUTHOR("NightFallsLikeRain");
-KPM_DESCRIPTION("全应用风险+广告拦截（兼容加载版，含微信/QQ/银行/系统软件白名单）");
+KPM_DESCRIPTION("全应用风险+广告拦截（零警告版，含微信/QQ/银行/系统软件白名单）");
 
 // 核心宏定义（兼容优先，无冲突依赖）
 #define MAX_PACKAGE_LEN 256       // 合理大小，避免内存溢出
@@ -285,8 +285,8 @@ static int can_block(const char *path) {
     return 0;
 }
 
-// 核心拦截钩子（使用KPM标准接口）
-static void before_mkdirat(hook_fargs4_t *args, void *udata) {
+// 核心拦截钩子（添加__used属性，消除未使用警告）
+static void __used before_mkdirat(hook_fargs4_t *args, void *udata) {
     if (!hma_running) return;
     char path[PATH_MAX];
     long len = compat_strncpy_from_user(path, (void *)syscall_argn(args, 1), PATH_MAX - 1);
@@ -307,7 +307,7 @@ static void before_mkdirat(hook_fargs4_t *args, void *udata) {
     }
 }
 
-static void before_chdir(hook_fargs1_t *args, void *udata) {
+static void __used before_chdir(hook_fargs1_t *args, void *udata) {
     if (!hma_running) return;
     char path[PATH_MAX];
     long len = compat_strncpy_from_user(path, (void *)syscall_argn(args, 0), PATH_MAX - 1);
@@ -329,7 +329,7 @@ static void before_chdir(hook_fargs1_t *args, void *udata) {
 }
 
 #if defined(__NR_rmdir)
-static void before_rmdir(hook_fargs1_t *args, void *udata) {
+static void __used before_rmdir(hook_fargs1_t *args, void *udata) {
     if (!hma_running) return;
     char path[PATH_MAX];
     long len = compat_strncpy_from_user(path, (void *)syscall_argn(args, 0), PATH_MAX - 1);
@@ -352,7 +352,7 @@ static void before_rmdir(hook_fargs1_t *args, void *udata) {
 #endif
 
 #if defined(__NR_unlinkat)
-static void before_unlinkat(hook_fargs4_t *args, void *udata) {
+static void __used before_unlinkat(hook_fargs4_t *args, void *udata) {
     if (!hma_running) return;
     char path[PATH_MAX];
     long len = compat_strncpy_from_user(path, (void *)syscall_argn(args, 1), PATH_MAX - 1);
@@ -375,7 +375,7 @@ static void before_unlinkat(hook_fargs4_t *args, void *udata) {
 #endif
 
 #ifdef __NR_openat
-static void before_openat(hook_fargs5_t *args, void *udata) {
+static void __used before_openat(hook_fargs5_t *args, void *udata) {
     if (!hma_running) return;
     char path[PATH_MAX];
     long len = compat_strncpy_from_user(path, (void *)syscall_argn(args, 1), PATH_MAX - 1);
@@ -398,7 +398,7 @@ static void before_openat(hook_fargs5_t *args, void *udata) {
 #endif
 
 #ifdef __NR_renameat
-static void before_renameat(hook_fargs4_t *args, void *udata) {
+static void __used before_renameat(hook_fargs4_t *args, void *udata) {
     if (!hma_running) return;
     char old_path[PATH_MAX], new_path[PATH_MAX];
     long len_old = compat_strncpy_from_user(old_path, (void *)syscall_argn(args, 1), PATH_MAX - 1);
@@ -451,7 +451,7 @@ static char *get_package_name(const char *path) {
 // 模块生命周期（KPM标准接口，确保加载兼容）
 static long mkdir_hook_init(const char *args, const char *event, void *__user reserved) {
     hook_err_t err;
-    pr_info("[HMA++] init start (兼容加载版)\n");
+    pr_info("[HMA++] init start (零警告版)\n");
 
     // 使用KPM标准挂钩接口，自动适配参数个数
     err = hook_syscall(__NR_mkdirat, (hook_func_t)before_mkdirat, NULL, NULL);
