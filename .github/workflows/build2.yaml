@@ -106,12 +106,18 @@ jobs:
           retention-days: 90
           if-no-files-found: error  # 无产物时直接标记失败
 
-      - name: 📝 构建报告（清晰展示结果）
+      - name: 📝 构建报告（修复语法错误）
         run: |
+          # 修复：通过 Bash 条件判断处理内核版本显示，避免 YAML 语法冲突
+          if [ -n "${{ github.event.inputs.kernel_version }}" ]; then
+            kernel_ver="${{ github.event.inputs.kernel_version }}"
+          else
+            kernel_ver="默认（$(uname -r)）"
+          fi
           echo "========================================"
           echo "✅ HMA++ Next KPM 模块构建完成！"
           echo "📌 源码文件：HMA++.c"
           echo "📌 构建模式：${{ github.event.inputs.build_mode }}"
-          echo "📌 内核版本：${{ github.event.inputs.kernel_version || '默认（'$(uname -r)')' }}"
+          echo "📌 内核版本：$kernel_ver"
           echo "📌 最终产物：HMA++.kpm（大小：$(du -sh HMA++.kpm | awk '{print $1}')）"
           echo "========================================"
