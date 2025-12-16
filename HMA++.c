@@ -13,7 +13,7 @@
 
 // 模块元信息
 KPM_NAME("HMA++ Next");
-KPM_VERSION("1.0.7");
+KPM_VERSION("1.0.8");
 KPM_LICENSE("GPLv3");
 KPM_AUTHOR("NightFallsLikeRain");
 KPM_DESCRIPTION("全应用风险+广告拦截（含微信/QQ/银行/系统软件白名单）");
@@ -22,13 +22,18 @@ KPM_DESCRIPTION("全应用风险+广告拦截（含微信/QQ/银行/系统软件
 #define MAX_PACKAGE_LEN 256
 #define ARG_SEPARATOR ','
 #define PATH_SEPARATOR '/'
+#define INTERVAL 2 * 60 * HZ // 2分钟（以jiffies计）
 
 // 全局开关（双开关设计，保持极简）
 static bool hma_running = true;        // 总开关
 static bool hma_ad_enabled = true;     // 广告拦截独立开关
 
+// 软件包名时间戳映射（记录最近一次拦截时间）
+static unsigned long last_blocked_time[MAX_PACKAGE_LEN] = {0};
+
 // 核心白名单（QQ/微信/系统软件/常用银行，无冗余）
 static const char *whitelist[] = {
+    "me.bmax.apatch",
     // 微信/QQ 核心应用
     "com.tencent.mm",          // 微信
     "com.tencent.mobileqq",    // QQ
@@ -117,7 +122,8 @@ static const char *deny_folder_list[] = {
     "emulator_data", "virtual_env", "fake_device", "emulator_cache", "virtual_device",
     "ad_plugin", "malicious_plugin", "ad_cache", "plugin_hack", "ad_inject",
     "data_modify", "crack_data", "modify_logs", "crack_cache", "data_hack",
-    "tool_residue", "illegal_backup", "hack_residue", "backup_crack", "tool_cache"
+    "tool_residue", "illegal_backup", "hack_residue", "backup_crack", "tool_cache",
+    "MiShopSkyTreeBundleProvider", "release"
 };
 #define DENY_FOLDER_SIZE (sizeof(deny_folder_list)/sizeof(deny_folder_list[0]))
 
@@ -239,15 +245,79 @@ static int is_ad_blocked(const char *path) {
     return 0;
 }
 
+// 4. 拦截时间间隔控制（返回true表示可以拦截）
+static int can_block(const char *path) {
+    if (!path || *path != PATH_SEPARATOR) return 0;
+
+    // 提取包名
+    const char *data_prefix = "/data/data/";
+    const char *android_data_prefix = "/storage/emulated/0/Android/data/";
+    const char *pkg_start = NULL;
+
+    if (strstr(path, data_prefix)) {
+        pkg_start = path + strlen(data_prefix);
+    } else if (strstr(path, android_data_prefix)) {
+        pkg_start = path + strlen(android_data_prefix);
+    } else {
+        return 0; // 非应用路径不记录时间
+    }
+
+    // 提取包名字符串
+    char pkg_name[MAX_PACKAGE_LEN] = {0};
+    size_t i = 0;
+    while (pkg_start[i] && pkg_start[i] != PATH_SEPARATOR && i < MAX_PACKAGE_LEN - 1) {
+        pkg_name[i] = pkg_start[i];
+        i++;
+    }
+    if (i == 0) return 0;
+
+    // 检查是否在白名单中
+    for (size_t j = 0; j < WHITELIST_SIZE; j++) {
+        if (strcmp(pkg_name, whitelist[j]) == 0) {
+            return 0; // 白名单应用不记录时间
+        }
+    }
+
+    // 计算包名的哈希值（简化处理）
+    unsigned long hash = 0;
+    for (i = 0; pkg_name[i]; i++) {
+        hash = (hash * 31) + pkg_name[i];
+    }
+
+    // 计算当前时间与最近一次拦截时间的差值
+    unsigned long current_time = jiffies;
+    unsigned long time_diff = current_time - last_blocked_time[hash % MAX_PACKAGE_LEN];
+
+    // 如果时间差大于等于2分钟，允许拦截
+    if (time_diff >= INTERVAL) {
+        last_blocked_time[hash % MAX_PACKAGE_LEN] = current_time;
+        return 1;
+    }
+    return 0;
+}
+
 // 核心拦截钩子（全应用适配，保持极简）
 static void before_mkdirat(hook_fargs4_t *args, void *udata) {
     if (!hma_running) return;
     char path[PATH_MAX];
     long len = compat_strncpy_from_user(path, (void *)syscall_argn(args, 1), PATH_MAX - 1);
-    if (len <= 0 || is_whitelisted(path)) return;
+    if (len <= 0) return;
     path[len] = '\0';
-    if (is_blocked_path(path) || is_ad_blocked(path)) {
-        pr_warn("[HMA++] mkdirat deny: %s\n", path);
+
+    // 白名单直接放行
+    if (is_whitelisted(path)) return;
+
+    // 拦截判断
+    int should_block = 0;
+    if (is_blocked_path(path)) {
+        should_block = 1;
+    } else if (is_ad_blocked(path)) {
+        should_block = 1;
+    }
+
+    // 时间间隔控制：同一软件2分钟内最多拦截一次
+    if (should_block && can_block(path)) {
+        pr_warn("[HMA++] mkdirat deny: %s (pkg: %s)\n", path, get_package_name(path));
         args->skip_origin = 1;
         args->ret = -EACCES;
     }
@@ -257,10 +327,23 @@ static void before_chdir(hook_fargs1_t *args, void *udata) {
     if (!hma_running) return;
     char path[PATH_MAX];
     long len = compat_strncpy_from_user(path, (void *)syscall_argn(args, 0), PATH_MAX - 1);
-    if (len <= 0 || is_whitelisted(path)) return;
+    if (len <= 0) return;
     path[len] = '\0';
-    if (is_blocked_path(path) || is_ad_blocked(path)) {
-        pr_warn("[HMA++] chdir deny: %s\n", path);
+
+    // 白名单直接放行
+    if (is_whitelisted(path)) return;
+
+    // 拦截判断
+    int should_block = 0;
+    if (is_blocked_path(path)) {
+        should_block = 1;
+    } else if (is_ad_blocked(path)) {
+        should_block = 1;
+    }
+
+    // 时间间隔控制：同一软件2分钟内最多拦截一次
+    if (should_block && can_block(path)) {
+        pr_warn("[HMA++] chdir deny: %s (pkg: %s)\n", path, get_package_name(path));
         args->skip_origin = 1;
         args->ret = -ENOENT;
     }
@@ -271,10 +354,23 @@ static void before_rmdir(hook_fargs1_t *args, void *udata) {
     if (!hma_running) return;
     char path[PATH_MAX];
     long len = compat_strncpy_from_user(path, (void *)syscall_argn(args, 0), PATH_MAX - 1);
-    if (len <= 0 || is_whitelisted(path)) return;
+    if (len <= 0) return;
     path[len] = '\0';
-    if (is_blocked_path(path) || is_ad_blocked(path)) {
-        pr_warn("[HMA++] rmdir deny: %s\n", path);
+
+    // 白名单直接放行
+    if (is_whitelisted(path)) return;
+
+    // 拦截判断
+    int should_block = 0;
+    if (is_blocked_path(path)) {
+        should_block = 1;
+    } else if (is_ad_blocked(path)) {
+        should_block = 1;
+    }
+
+    // 时间间隔控制：同一软件2分钟内最多拦截一次
+    if (should_block && can_block(path)) {
+        pr_warn("[HMA++] rmdir deny: %s (pkg: %s)\n", path, get_package_name(path));
         args->skip_origin = 1;
         args->ret = -ENOENT;
     }
@@ -286,10 +382,23 @@ static void before_unlinkat(hook_fargs4_t *args, void *udata) {
     if (!hma_running) return;
     char path[PATH_MAX];
     long len = compat_strncpy_from_user(path, (void *)syscall_argn(args, 1), PATH_MAX - 1);
-    if (len <= 0 || is_whitelisted(path)) return;
+    if (len <= 0) return;
     path[len] = '\0';
-    if (is_blocked_path(path) || is_ad_blocked(path)) {
-        pr_warn("[HMA++] unlinkat deny: %s\n", path);
+
+    // 白名单直接放行
+    if (is_whitelisted(path)) return;
+
+    // 拦截判断
+    int should_block = 0;
+    if (is_blocked_path(path)) {
+        should_block = 1;
+    } else if (is_ad_blocked(path)) {
+        should_block = 1;
+    }
+
+    // 时间间隔控制：同一软件2分钟内最多拦截一次
+    if (should_block && can_block(path)) {
+        pr_warn("[HMA++] unlinkat deny: %s (pkg: %s)\n", path, get_package_name(path));
         args->skip_origin = 1;
         args->ret = -ENOENT;
     }
@@ -301,10 +410,23 @@ static void before_openat(hook_fargs5_t *args, void *udata) {
     if (!hma_running) return;
     char path[PATH_MAX];
     long len = compat_strncpy_from_user(path, (void *)syscall_argn(args, 1), PATH_MAX - 1);
-    if (len <= 0 || is_whitelisted(path)) return;
+    if (len <= 0) return;
     path[len] = '\0';
-    if (is_blocked_path(path) || is_ad_blocked(path)) {
-        pr_warn("[HMA++] openat deny: %s\n", path);
+
+    // 白名单直接放行
+    if (is_whitelisted(path)) return;
+
+    // 拦截判断
+    int should_block = 0;
+    if (is_blocked_path(path)) {
+        should_block = 1;
+    } else if (is_ad_blocked(path)) {
+        should_block = 1;
+    }
+
+    // 时间间隔控制：同一软件2分钟内最多拦截一次
+    if (should_block && can_block(path)) {
+        pr_warn("[HMA++] openat deny: %s (pkg: %s)\n", path, get_package_name(path));
         args->skip_origin = 1;
         args->ret = -ENOENT;
     }
@@ -324,18 +446,52 @@ static void before_renameat(hook_fargs4_t *args, void *udata) {
     // 白名单校验（任一路径在白名单即放行）
     if (is_whitelisted(old_path) || is_whitelisted(new_path)) return;
 
-    if (is_blocked_path(old_path) || is_blocked_path(new_path) || is_ad_blocked(old_path) || is_ad_blocked(new_path)) {
-        pr_warn("[HMA++] renameat deny: %s -> %s\n", old_path, new_path);
+    // 拦截判断
+    int should_block = 0;
+    if (is_blocked_path(old_path) || is_blocked_path(new_path)) {
+        should_block = 1;
+    } else if (is_ad_blocked(old_path) || is_ad_blocked(new_path)) {
+        should_block = 1;
+    }
+
+    // 时间间隔控制：同一软件2分钟内最多拦截一次
+    if (should_block && can_block(old_path)) { // 使用旧路径的包名计算时间间隔
+        pr_warn("[HMA++] renameat deny: %s -> %s (pkg: %s)\n", old_path, new_path, get_package_name(old_path));
         args->skip_origin = 1;
         args->ret = -ENOENT;
     }
 }
 #endif
 
+// 辅助函数：提取包名
+static char *get_package_name(const char *path) {
+    static char pkg_name[MAX_PACKAGE_LEN] = {0};
+    memset(pkg_name, 0, sizeof(pkg_name));
+
+    const char *data_prefix = "/data/data/";
+    const char *android_data_prefix = "/storage/emulated/0/Android/data/";
+    const char *pkg_start = NULL;
+
+    if (strstr(path, data_prefix)) {
+        pkg_start = path + strlen(data_prefix);
+    } else if (strstr(path, android_data_prefix)) {
+        pkg_start = path + strlen(android_data_prefix);
+    } else {
+        return pkg_name;
+    }
+
+    size_t i = 0;
+    while (pkg_start[i] && pkg_start[i] != PATH_SEPARATOR && i < MAX_PACKAGE_LEN - 1) {
+        pkg_name[i] = pkg_start[i];
+        i++;
+    }
+    return pkg_name;
+}
+
 // 模块生命周期（极简无冗余）
 static long mkdir_hook_init(const char *args, const char *event, void *__user reserved) {
     hook_err_t err;
-    pr_info("[HMA++] init start (全应用拦截+核心白名单)\n");
+    pr_info("[HMA++] init start (全应用拦截+核心白名单+拦截间隔控制)\n");
 
     // 挂钩核心文件操作syscall
     err = hook_syscalln(__NR_mkdirat, 3, before_mkdirat, NULL, NULL);
@@ -355,7 +511,8 @@ static long mkdir_hook_init(const char *args, const char *event, void *__user re
     hook_syscalln(__NR_renameat, 4, before_renameat, NULL, NULL);
 #endif
 
-    pr_info("[HMA++] init success (global: %d, ad: %d)\n", hma_running, hma_ad_enabled);
+    pr_info("[HMA++] init success (global: %d, ad: %d, interval: %d seconds)\n", 
+            hma_running, hma_ad_enabled, INTERVAL / HZ);
     return 0;
 }
 
