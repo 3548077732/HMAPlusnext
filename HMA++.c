@@ -10,6 +10,7 @@
 #include <linux/errno.h>
 #include <uapi/linux/limits.h>
 #include <linux/kernel.h>
+#include <linux/jiffies.h>  // 引入HZ定义所需头文件
 
 // 模块元信息
 KPM_NAME("HMA++ Next");
@@ -30,6 +31,13 @@ static bool hma_ad_enabled = true;     // 广告拦截独立开关
 
 // 软件包名时间戳映射（记录最近一次拦截时间）
 static unsigned long last_blocked_time[MAX_PACKAGE_LEN] = {0};
+
+// 函数原型声明（修复隐式声明错误）
+static char *get_package_name(const char *path);
+static int is_whitelisted(const char *path);
+static int is_blocked_path(const char *path);
+static int is_ad_blocked(const char *path);
+static int can_block(const char *path);
 
 // 核心白名单（QQ/微信/系统软件/常用银行，无冗余）
 static const char *whitelist[] = {
