@@ -21,6 +21,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # 新增：允许访问 GitHub API（用于获取 KPM 最新版本）
+      id-token: write
 
     steps:
       - name: 🔍 检出代码（包含源码 HMA++.c）
@@ -34,17 +36,18 @@ jobs:
           echo "系统信息："
           uname -a  # 输出内核版本
           lsb_release -a  # 输出系统版本
+          echo "网络测试："
+          ping -c 2 github.com  # 测试 GitHub 连通性
           echo "========================================"
 
       - name: 🛠️ 安装编译依赖（修复内核头文件匹配）
         run: |
           sudo apt update -y || { echo "❌ apt更新失败！"; exit 1; }
-          # 安装核心依赖
-          sudo apt install -y gcc make libelf-dev bc flex bison dwarves wget --fix-missing || { echo "❌ 核心依赖安装失败！"; exit 1; }
+          # 安装核心依赖（含 wget 增强参数）
+          sudo apt install -y gcc make libelf-dev bc flex bison dwarves wget jq --fix-missing || { echo "❌ 核心依赖安装失败！"; exit 1; }
           
           # 处理内核头文件（关键修复：确保与运行内核一致）
           if [ -n "${{ github.event.inputs.kernel_version }}" ]; then
-            # 用户指定内核版本
             KERNEL_VER="${{ github.event.inputs.kernel_version }}"
             sudo apt install -y linux-headers-${KERNEL_VER} linux-image-${KERNEL_VER} || {
               echo "❌ 安装指定内核版本（${KERNEL_VER}）的头文件/镜像失败！";
@@ -52,29 +55,55 @@ jobs:
               exit 1;
             }
           else
-            # 自动匹配运行内核
             KERNEL_VER=$(uname -r)
             sudo apt install -y linux-headers-${KERNEL_VER} || {
               echo "❌ 安装当前内核（${KERNEL_VER}）的头文件失败！";
               echo "ℹ️  尝试安装通用内核头文件...";
               sudo apt install -y linux-headers-generic || { echo "❌ 通用内核头文件安装失败！"; exit 1; }
-              KERNEL_VER="generic"  # 降级使用通用头文件
+              KERNEL_VER="generic"
             }
           fi
           echo "✅ 内核头文件安装完成（版本：${KERNEL_VER}）"
 
-          # 修复：使用 KPM 最新稳定版（避免旧版本兼容问题）
-          KPM_VERSION="v1.1.0"  # 最新稳定版（2024-12 验证可用）
-          KPM_BIN_URL="https://github.com/chenxyu/kpm/releases/download/${KPM_VERSION}/kpm-linux-amd64"
-          wget -q -O /tmp/kpm ${KPM_BIN_URL} || { echo "❌ 下载 KPM 失败！"; exit 1; }
-          chmod +x /tmp/kpm
-          sudo mv /tmp/kpm /usr/local/bin/
+          # 核心修复：KPM 下载（重试+备用源+自动获取最新版本）
+          echo "📌 开始获取 KPM 最新版本..."
+          # 步骤1：通过 GitHub API 获取 KPM 最新 release 的下载链接（避免手动指定版本）
+          KPM_REPO="chenxyu/kpm"
+          KPM_DOWNLOAD_URL=$(curl -s "https://api.github.com/repos/${KPM_REPO}/releases/latest" | jq -r '.assets[] | select(.name == "kpm-linux-amd64") | .browser_download_url')
           
-          # 验证 KPM 安装
+          if [ -z "${KPM_DOWNLOAD_URL}" ] || [ "${KPM_DOWNLOAD_URL}" == "null" ]; then
+            echo "⚠️  获取最新版本失败，使用备用版本 v1.1.0"
+            KPM_DOWNLOAD_URL="https://github.com/chenxyu/kpm/releases/download/v1.1.0/kpm-linux-amd64"
+          fi
+          echo "✅ KPM 下载链接：${KPM_DOWNLOAD_URL}"
+
+          # 步骤2：使用 wget 重试下载（5次重试+忽略证书+详细日志）
+          echo "📌 开始下载 KPM（最多5次重试）..."
+          wget -v -t 5 -T 30 --no-check-certificate -O /tmp/kpm "${KPM_DOWNLOAD_URL}" || {
+            echo "⚠️  主源下载失败，尝试备用源（克隆仓库）..."
+            # 备用方案：克隆 KPM 仓库（使用 --depth 1 快速克隆，避免认证问题）
+            git clone --depth 1 https://github.com/chenxyu/kpm.git /tmp/kpm-repo || {
+              echo "❌ 备用源克隆失败！请检查网络或手动安装 KPM！";
+              exit 1;
+            }
+            # 编译备用源的 KPM（确保可用）
+            cd /tmp/kpm-repo && make -j$(nproc) && sudo mv kpm /usr/local/bin/ || {
+              echo "❌ 备用源编译 KPM 失败！";
+              exit 1;
+            }
+          }
+
+          # 步骤3：安装 KPM（主源下载成功的情况）
+          if [ -f "/tmp/kpm" ]; then
+            chmod +x /tmp/kpm
+            sudo mv /tmp/kpm /usr/local/bin/
+          fi
+
+          # 步骤4：验证 KPM 安装
           if ! command -v kpm &> /dev/null; then
             echo "❌ KPM 工具安装失败！"; exit 1;
           fi
-          KPM_INSTALLED_VER=$(kpm --version | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+')
+          KPM_INSTALLED_VER=$(kpm --version | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' || echo "unknown")
           echo "✅ KPM 工具安装成功（版本：${KPM_INSTALLED_VER}）"
 
       - name: ⚙️ 配置构建参数
@@ -89,41 +118,26 @@ jobs:
 
       - name: 🚀 编译源码（详细日志模式）
         run: |
-          # 确认源码存在
           if [ ! -f "HMA++.c" ]; then echo "❌ 未找到源码 HMA++.c！"; exit 1; fi
-          
-          # 清理旧产物
           make clean || echo "ℹ️  无旧产物可清理"
-          
-          # 编译（VERBOSE=1 输出详细日志，便于排查错误）
           echo "📌 开始编译（内核版本：${KERNEL_VER}，构建参数：${{ env.EXTRA_CFLAGS }}）"
           make -j$(nproc) VERBOSE=1 EXTRA_CFLAGS="${{ env.EXTRA_CFLAGS }}" || {
             echo "❌ 编译失败！查看上面详细日志排查问题";
             exit 1;
           }
-          
-          # 校验编译产物
           if [ ! -f "HMA++.o" ]; then echo "❌ 未生成 HMA++.o！"; exit 1; fi
           if [ ! -f "HMA_Next.ko" ]; then echo "❌ 未生成 HMA_Next.ko！"; exit 1; fi
-          
-          # 验证内核模块合法性
           echo "📌 内核模块信息："
-          modinfo HMA_Next.ko | grep -E "filename|version|author|license|depends" || {
-            echo "⚠️  模块信息读取警告（可能不影响使用）";
-          }
+          modinfo HMA_Next.ko | grep -E "filename|version|author|license|depends" || echo "⚠️  模块信息读取警告（可能不影响使用）"
           echo "✅ 编译成功！"
 
       - name: 📦 打包为 KPM 模块（详细模式）
         run: |
           echo "📌 开始打包 KPM 模块..."
           make package VERBOSE=1 || { echo "❌ KPM 打包失败！"; exit 1; }
-          
-          # 校验 KPM 产物
           if [ ! -f "HMA++.kpm" ]; then echo "❌ 未生成 HMA++.kpm！"; exit 1; fi
-          
-          # 验证 KPM 模块完整性
-          kpm info HMA++.kpm || { echo "⚠️  KPM 模块信息读取警告"; }
-          ls -lH HMA++.kpm  # 显示产物详情
+          kpm info HMA++.kpm || echo "⚠️  KPM 模块信息读取警告"
+          ls -lH HMA++.kpm
           echo "✅ KPM 打包成功！"
 
       - name: 📤 上传产物（含日志）
@@ -136,7 +150,7 @@ jobs:
             HMA_Next.ko
             HMA++.kpm
             Makefile
-            ./*.log  # 若有日志文件，一并上传
+            ./*.log
           retention-days: 90
           if-no-files-found: error
 
