@@ -1,0 +1,113 @@
+# .github/workflows/build-hma-kpm.yml
+name: 手动构建 HMA++ Next KPM 模块
+on:
+  workflow_dispatch:  # 手动触发核心
+    inputs:
+      kernel_version:
+        description: "指定内核版本（如 5.15.0-78-generic，留空用默认）"
+        required: false
+        default: ""
+      build_mode:
+        description: "构建模式"
+        type: choice
+        required: true
+        default: "release"
+        options:
+          - release  # 发布模式（精简体积，无调试信息）
+          - debug    # 调试模式（保留调试信息，便于排查）
+
+jobs:
+  build-kpm:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # 用于上传KPM产物
+
+    steps:
+      - name: 🔍 检出代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1  # 仅拉取最新代码，加速构建
+
+      - name: 🛠️ 安装编译依赖（含 KPM 工具链）
+        run: |
+          sudo apt update -y
+          # 基础编译工具
+          sudo apt install -y gcc make linux-headers-$(uname -r) libelf-dev bc flex bison dwarves
+          # 安装 KPM 框架工具链（打包 .kpm 必需）
+          git clone https://github.com/chenxyu/kpm.git /tmp/kpm
+          cd /tmp/kpm
+          make -j$(nproc)
+          sudo make install
+          # 验证 KPM 安装
+          if ! command -v kpm &> /dev/null; then
+            echo "错误：KPM 工具安装失败！"
+            exit 1
+          fi
+          # 安装指定内核头文件（可选）
+          if [ -n "${{ github.event.inputs.kernel_version }}" ]; then
+            sudo apt install -y linux-headers-${{ github.event.inputs.kernel_version }}
+          fi
+
+      - name: ⚙️ 配置构建参数
+        run: |
+          # 调试模式添加 -g 编译选项
+          if [ "${{ github.event.inputs.build_mode }}" = "debug" ]; then
+            echo "EXTRA_CFLAGS=-g" >> $GITHUB_ENV
+          fi
+          # 指定 KPM 模块元信息（与代码中一致）
+          echo "KPM_NAME=HMA++ Next" >> $GITHUB_ENV
+          echo "KPM_VERSION=1.0.12" >> $GITHUB_ENV
+
+      - name: 🚀 编译内核模块（.ko）
+        run: |
+          make clean
+          # 多线程编译，适配 KPM 框架编译规则
+          make -j$(nproc) EXTRA_CFLAGS="${{ env.EXTRA_CFLAGS }}"
+          # 验证 .ko 文件生成
+          if [ ! -f "HMA++.ko" ]; then
+            echo "错误：内核模块编译失败！"
+            exit 1
+          fi
+          modinfo HMA++.ko  # 输出模块信息，验证合法性
+
+      - name: 📦 打包为 KPM 模块（核心步骤）
+        run: |
+          # 使用 KPM 工具打包 .ko 为 .kpm（符合 KPM 加载规范）
+          kpm pack \
+            --name "${{ env.KPM_NAME }}" \
+            --version "${{ env.KPM_VERSION }}" \
+            --author "NightFallsLikeRain" \
+            --license "GPLv3" \
+            --description "全应用风险+广告拦截（含微信/QQ/银行/系统软件白名单）" \
+            --input "HMA++.ko" \
+            --output "HMA++_Next_${{ github.event.inputs.build_mode }}.kpm"
+          # 验证 KPM 文件生成
+          if [ ! -f "HMA++_Next_${{ github.event.inputs.build_mode }}.kpm" ]; then
+            echo "错误：KPM 模块打包失败！"
+            exit 1
+          fi
+          # 输出 KPM 模块信息
+          kpm info "HMA++_Next_${{ github.event.inputs.build_mode }}.kpm"
+
+      - name: 📤 上传 KPM 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: HMA++-Next-KPM-${{ github.event.inputs.build_mode }}
+          path: |
+            HMA++_Next_${{ github.event.inputs.build_mode }}.kpm  # 核心KPM产物
+            HMA++.ko  # 保留原始.ko，便于备用
+            Makefile  # 构建配置文件
+          retention-days: 90  # 产物保留90天，满足长期使用需求
+          if-no-files-found: error  # 无产物时标记构建失败
+
+      - name: 📝 构建报告（含使用说明）
+        run: |
+          echo "========================================"
+          echo "✅ KPM 模块构建完成！"
+          echo "📌 构建模式：${{ github.event.inputs.build_mode }}"
+          echo "📌 内核版本：${{ github.event.inputs.kernel_version || '默认（'$(uname -r)')' }}"
+          echo "📌 产物名称：HMA++_Next_${{ github.event.inputs.build_mode }}.kpm"
+          echo "📌 加载命令：kpm load HMA++_Next_${{ github.event.inputs.build_mode }}.kpm"
+          echo "📌 控制命令：echo '1,1' > /proc/kpmctl/HMA++ Next"
+          echo "📌 日志查看：dmesg | grep [HMA++]"
+          echo "========================================"
