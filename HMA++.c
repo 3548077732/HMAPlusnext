@@ -11,25 +11,26 @@
 #include <uapi/linux/limits.h>
 #include <linux/kernel.h>
 
-// ====================== KPM 标准元信息（仅保留框架支持的宏） ======================
-#define MODULE_NAME "HMA_Next"  // 统一模块名称定义
+// ====================== KPM 标准元信息 ======================
+#define MODULE_NAME "HMA_Next"
 KPM_NAME(MODULE_NAME);
-KPM_VERSION("1.0.17");
+KPM_VERSION("1.0.18");
 KPM_LICENSE("GPLv3");
 KPM_AUTHOR("NightFallsLikeRain");
 KPM_DESCRIPTION("Apatch专属：全应用风险+广告拦截（含微信/QQ/银行/系统白名单）");
 
+// ====================== 核心宏定义 ======================
 #define MAX_PACKAGE_LEN 256
 #define ARG_SEPARATOR ','
 #define PATH_SEPARATOR '/'
 #define HZ 100
 #define INTERVAL 2 * 60 * HZ
-#define APATCH_KPM_PROC_PATH "/proc/apatch/kpm/" MODULE_NAME  // 动态拼接路径
+#define APATCH_KPM_PROC_PATH "/proc/apatch/kpm/" MODULE_NAME
 
-// ====================== 内核符号声明（与头文件保持一致，修复冲突） ======================
+// ====================== 内核符号声明 ======================
 extern unsigned long long get_jiffies_64(void);
 extern unsigned long jiffies;
-// 修正hook_syscalln/unhook_syscalln声明：与syscall.h头文件类型一致
+// 与头文件一致的函数声明
 extern hook_err_t hook_syscalln(int nr, int narg, void *before, void *after, void *udata);
 extern void unhook_syscalln(int nr, void *before, void *after);
 
@@ -125,7 +126,7 @@ static const char *ad_file_keywords[] = {
 };
 #define AD_FILE_KEYWORD_SIZE (sizeof(ad_file_keywords)/sizeof(ad_file_keywords[0]))
 
-// ====================== 核心工具函数（修复get_jiffies_64警告） ======================
+// ====================== 核心工具函数（修复IS_ENABLED错误） ======================
 static int is_whitelisted(const char *path) {
     if (!path || *path != PATH_SEPARATOR) return 0;
 
@@ -251,13 +252,15 @@ static int can_block(const char *path) {
         hash = (hash * 31) + pkg_name[i];
     }
 
-    // 修复警告：移除get_jiffies_64地址判断（内核函数地址非NULL），直接使用并降级
+    // 核心修复：移除IS_ENABLED宏，改用函数指针非NULL判断（兼容所有内核）
     unsigned long current_time;
-#if IS_ENABLED(CONFIG_GENERIC_TIME)
-    current_time = (unsigned long)get_jiffies_64();
-#else
-    current_time = jiffies;
-#endif
+    // 声明函数指针，避免编译器警告
+    unsigned long long (*get_jiffies_func)(void) = get_jiffies_64;
+    if (get_jiffies_func != NULL) {
+        current_time = (unsigned long)get_jiffies_func();
+    } else {
+        current_time = jiffies;
+    }
 
     unsigned long time_diff = current_time - last_blocked_time[hash % MAX_PACKAGE_LEN];
     if (time_diff >= INTERVAL) {
@@ -267,7 +270,7 @@ static int can_block(const char *path) {
     return 0;
 }
 
-// ====================== 核心拦截钩子（保持不变） ======================
+// ====================== 核心拦截钩子 ======================
 static void __used before_mkdirat(hook_fargs4_t *args, void *udata) {
     if (!hma_running) return;
     char path[PATH_MAX];
@@ -340,7 +343,7 @@ static void __used before_unlinkat(hook_fargs4_t *args, void *udata) {
 }
 #endif
 
-// ====================== 辅助函数（保持不变） ======================
+// ====================== 辅助函数 ======================
 static char *get_package_name(const char *path) {
     static char pkg_name[MAX_PACKAGE_LEN] = {0};
     memset(pkg_name, 0, sizeof(pkg_name));
@@ -365,18 +368,16 @@ static char *get_package_name(const char *path) {
     return pkg_name;
 }
 
-// ====================== 模块生命周期函数（修复syscall参数类型） ======================
+// ====================== 模块生命周期函数 ======================
 static long __used hma_apatch_init(const char *args, const char *event, void *__user reserved) {
     hook_err_t err;
     pr_info("[%s/Apatch] init start (Apatch >=0.5.0 compatible)\n", MODULE_NAME);
 
-    // 修复syscall号类型：与hook_syscalln声明一致（int类型）
     if ((int)__NR_mkdirat <= 0 || (int)__NR_chdir <= 0) {
         pr_err("[%s/Apatch] invalid syscall number (Android kernel not compatible)\n", MODULE_NAME);
         return -EINVAL;
     }
 
-    // 修复参数类型：使用void*强制转换，与头文件一致
     err = hook_syscalln((int)__NR_mkdirat, 3, (void *)before_mkdirat, NULL, NULL);
     if (err) {
         pr_err("[%s/Apatch] hook mkdirat err: %d\n", MODULE_NAME, err);
