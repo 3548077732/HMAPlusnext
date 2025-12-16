@@ -1,39 +1,29 @@
-# 极简KPM模块Makefile（源码文件：HMA++.c）
-obj-m += HMA_Next.o
-HMA_Next-objs := HMA++.o  # 明确指定源码文件为 HMA++.c（编译后生成 HMA++.o）
+TARGET_COMPILE=./arm-gnu-toolchain-14.2.rel1-x86_64-aarch64-none-elf/bin/aarch64-none-elf-
+KP_DIR = ./KernelPatch
 
-# 基础编译参数（兼容所有内核，禁用冗余警告）
-EXTRA_CFLAGS += -Wall -Wextra -Wno-unused-parameter
-EXTRA_CFLAGS += -O2  # 平衡性能与兼容性
-EXTRA_CFLAGS += -DMODULE -D__KERNEL__ -include linux/kconfig.h -include linux/autoconf.h
+CC = $(TARGET_COMPILE)gcc
+LD = $(TARGET_COMPILE)ld
 
-# 编译目标（默认使用当前内核头文件）
-all:
-	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules
+INCLUDE_DIRS := . include patch/include linux/include linux/arch/arm64/include linux/tools/arch/arm64/include
 
-# 支持指定自定义内核头文件路径
-KERNELDIR ?= /lib/modules/$(shell uname -r)/build
-modules:
-	make -C $(KERNELDIR) M=$(PWD) modules
+INCLUDE_FLAGS := $(foreach dir,$(INCLUDE_DIRS),-I$(KP_DIR)/kernel/$(dir))
 
-# 清理产物（包含 KPM 产物和 .o 文件）
+CFLAGS = -I$(AP_INCLUDE_PATH) $(INCLUDE_FLAGS) -Wall -Ofast -fno-PIC -fno-asynchronous-unwind-tables -fno-stack-protector -fno-unwind-tables -fno-semantic-interposition -U_FORTIFY_SOURCE -fno-common -fvisibility=hidden
+
+objs := HMA++.o
+
+all: HMA++.kpm
+
+HMA++.kpm: ${objs}
+	${CC} -r -o $@ $^
+
+%.o: %.c
+	${CC} $(CFLAGS) $(INCLUDE_FLAGS) -c -O2 -o $@ $<
+
+.PHONY: clean
 clean:
-	make -C $(KERNELDIR) M=$(PWD) clean
-	rm -f .cache.mk .tmp_versions Module.symvers modules.order HMA++.kpm HMA++.o  # 明确清理源码编译产物
-
-# 打包为 KPM 模块（强制产物名：HMA++.kpm，与源码名呼应）
-package: all
-	# 第一步：校验源码编译产物 HMA++.o 是否存在
-	if [ ! -f "HMA++.o" ]; then \
-		echo "❌ 错误：源码 HMA++.c 编译失败，未生成 HMA++.o"; \
-		exit 1; \
-	fi
-	# 第二步：校验内核模块 .ko 是否生成
-	if [ ! -f "HMA_Next.ko" ]; then \
-		echo "❌ 错误：内核模块链接失败，未生成 HMA_Next.ko"; \
-		exit 1; \
-	fi
-	# 第三步：打包 KPM（强制输出为 HMA++.kpm，与源码名一致）
+	rm -rf *.kpm
+	find . -name "*.o" | xargs rm -f
 	kpm pack \
 		--name $(shell grep KPM_NAME HMA++.c | awk -F '"' '{print $$2}') \
 		--version $(shell grep KPM_VERSION HMA++.c | awk -F '"' '{print $$2}') \
