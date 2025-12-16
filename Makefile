@@ -1,26 +1,34 @@
-TARGET_COMPILE=./arm-gnu-toolchain-14.2.rel1-x86_64-aarch64-none-elf/bin/aarch64-none-elf-
-KP_DIR = ./KernelPatch
+# 极简KPM模块Makefile（无额外依赖，通用所有Linux/Android内核）
+obj-m += HMA_Next.o
+HMA_Next-objs := HMA++.o  # 对应你的源码文件名
 
-CC = $(TARGET_COMPILE)gcc
-LD = $(TARGET_COMPILE)ld
+# 基础编译参数（禁用冗余优化，确保兼容性）
+EXTRA_CFLAGS += -Wall -Wextra -Wno-unused-parameter
+EXTRA_CFLAGS += -O2  # 基础优化，平衡性能与兼容性
+EXTRA_CFLAGS += -DMODULE -D__KERNEL__ -include linux/kconfig.h -include linux/autoconf.h
 
-INCLUDE_DIRS := . include patch/include linux/include linux/arch/arm64/include linux/tools/arch/arm64/include
+# 编译目标（默认使用当前内核头文件）
+all:
+	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules
 
-INCLUDE_FLAGS := $(foreach dir,$(INCLUDE_DIRS),-I$(KP_DIR)/kernel/$(dir))
+# 支持指定内核头文件路径（适配交叉编译/自定义内核）
+# 使用方式：make KERNELDIR=/path/to/kernel-headers
+KERNELDIR ?= /lib/modules/$(shell uname -r)/build
+modules:
+	make -C $(KERNELDIR) M=$(PWD) modules
 
-CFLAGS = -I$(AP_INCLUDE_PATH) $(INCLUDE_FLAGS) -Wall -Ofast -fno-PIC -fno-asynchronous-unwind-tables -fno-stack-protector -fno-unwind-tables -fno-semantic-interposition -U_FORTIFY_SOURCE -fno-common -fvisibility=hidden
-
-objs := HMA++.o
-
-all: HMA++.kpm
-
-HMA++.kpm: ${objs}
-	${CC} -r -o $@ $^
-
-%.o: %.c
-	${CC} $(CFLAGS) $(INCLUDE_FLAGS) -c -O3 -o $@ $<
-
-.PHONY: clean
+# 清理编译产物（极简清理，无冗余）
 clean:
-	rm -rf *.kpm
-	find . -name "*.o" | xargs rm -f
+	make -C $(KERNELDIR) M=$(PWD) clean
+	rm -f .cache.mk .tmp_versions Module.symvers modules.order
+
+# 打包为KPM模块（调用KPM框架工具，通用打包）
+package: all
+	kpm pack \
+		--name $(shell grep KPM_NAME HMA++.c | awk -F '"' '{print $$2}') \
+		--version $(shell grep KPM_VERSION HMA++.c | awk -F '"' '{print $$2}') \
+		--author $(shell grep KPM_AUTHOR HMA++.c | awk -F '"' '{print $$2}') \
+		--license $(shell grep KPM_LICENSE HMA++.c | awk -F '"' '{print $$2}') \
+		--description $(shell grep KPM_DESCRIPTION HMA++.c | awk -F '"' '{print $$2}') \
+		--input HMA_Next.ko \
+		--output $(shell grep KPM_NAME HMA++.c | awk -F '"' '{print $$2}').kpm
