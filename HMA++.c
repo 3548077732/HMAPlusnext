@@ -11,65 +11,24 @@
 #include <uapi/linux/limits.h>
 #include <linux/kernel.h>
 
-// 1. 避免头文件冲突（优先定义__user）
-#ifndef __user
-#define __user
-#endif
-
-// 2. 仅声明KPM核心符号（删除compat_copy_to_user，使用头文件原生定义）
-extern hook_err_t hook_syscalln(int nr, int narg, void *before, void *after, void *udata) __attribute__((weak));
-extern void unhook_syscalln(int nr, void *before, void *after) __attribute__((weak));
-
-// 3. 定义syscall号默认值（无此syscall时跳过挂钩）
-#ifndef __NR_mkdirat
-#define __NR_mkdirat -1
-#endif
-#ifndef __NR_chdir
-#define __NR_chdir -1
-#endif
-#ifndef __NR_rmdir
-#define __NR_rmdir -1
-#endif
-#ifndef __NR_unlinkat
-#define __NR_unlinkat -1
-#endif
-#ifndef __NR_openat
-#define __NR_openat -1
-#endif
-#ifndef __NR_renameat
-#define __NR_renameat -1
-#endif
-
-// 4. 强制日志定义（所有内核可见）
-#ifndef pr_info
-#define pr_info(fmt, ...) printk(KERN_INFO "[HMA++] " fmt "\n", ##__VA_ARGS__)
-#endif
-#ifndef pr_err
-#define pr_err(fmt, ...) printk(KERN_ERR "[HMA++] " fmt "\n", ##__VA_ARGS__)
-#endif
-#ifndef pr_warn
-#define pr_warn(fmt, ...) printk(KERN_WARN "[HMA++] " fmt "\n", ##__VA_ARGS__)
-#endif
-
-// 模块元信息（与打包脚本版本一致）
+// 模块元信息
 KPM_NAME("HMA++ Next");
-KPM_VERSION("1.0.14");
+KPM_VERSION("1.0.9");
 KPM_LICENSE("GPLv3");
 KPM_AUTHOR("NightFallsLikeRain");
-KPM_DESCRIPTION("非白名单拦截+核心应用放行（强兼容版）");
+KPM_DESCRIPTION("全应用风险+广告拦截（含微信/QQ/银行/系统软件白名单）");
 
-// 核心宏定义
+// 核心宏定义（移除路径限制，适配所有应用）
 #define MAX_PACKAGE_LEN 576
 #define ARG_SEPARATOR ','
 #define PATH_SEPARATOR '/'
 
-// 全局开关
-static bool hma_running = true;
-static bool hma_ad_enabled = true;
+// 全局开关（双开关设计，保持极简）
+static bool hma_running = true;        // 总开关
+static bool hma_ad_enabled = true;     // 广告拦截独立开关
 
-// 核心白名单（保留用户所有配置，确保语法正确）
-static const char *app_whitelist[] = {
-    // 微信/QQ 核心应用
+// 核心白名单（QQ/微信/系统软件/常用银行，无冗余）
+static const char *whitelist[] = {
     "com.tencent.mm", "com.tencent.mobileqq", "com.tencent.minihd.qq", "com.tencent.wework",
     // 系统基础软件
     "com.android.systemui", "com.android.settings", "com.android.phone", "com.android.contacts",
@@ -112,14 +71,33 @@ static const char *app_whitelist[] = {
     "not.val.cheat", "com.haobammmm", "bin.mt.plus", "com.tencent.tmgp.dfm",
     "com.miHoYo.hkrpg", "com.tencent.tmgp.sgame", "com.ss.android.lark.dahx258", "com.omarea.vtools"
 };
-#define APP_WHITELIST_SIZE (sizeof(app_whitelist)/sizeof(app_whitelist[0]))
+#define WHITELIST_SIZE (sizeof(whitelist)/sizeof(whitelist[0]))
 
-// 广告拦截黑名单（合并风险文件夹关键词，确保语法正确）
+// 1.风险拦截黑名单（精简高效）
+static const char *deny_list[] = {
+};
+#define DENY_LIST_SIZE (sizeof(deny_list)/sizeof(deny_list[0]))
+
+// 风险文件夹黑名单（全路径匹配）
+static const char *deny_folder_list[] = {
+      "xposed_temp", "lsposed_cache", "hook_inject_data", "xp_module_cache", "lspatch_temp",
+    "system_modify", "root_tool_data", "magisk_temp", "ksu_cache", "kernel_mod_dir",
+    "privacy_steal", "data_crack", "illegal_access", "info_collect", "secret_monitor",
+    "apk_modify", "pirate_apk", "illegal_install", "app_cracked", "patch_apk_dir",
+    "risk_temp", "unsafe_operation", "malicious_dir", "temp_hack", "unsafe_cache",
+    "termux_data", "apktool_temp", "reverse_engineer", "hack_tool_data", "crack_tool_dir",
+    "emulator_data", "virtual_env", "fake_device", "emulator_cache", "virtual_device",
+    "ad_plugin", "malicious_plugin", "ad_cache", "plugin_hack", "ad_inject",
+    "data_modify", "crack_data", "modify_logs", "crack_cache", "data_hack",
+    "tool_residue", "illegal_backup", "hack_residue", "backup_crack", "tool_cache"
+};
+#define DENY_FOLDER_SIZE (sizeof(deny_folder_list)/sizeof(deny_folder_list[0]))
+
+// 2.广告拦截黑名单（全路径关键词匹配）
 static const char *ad_file_keywords[] = {
     "ad_", "_ad.", "ads_", "_ads.", "advertise", "adcache", "adimg", "advideo",
     "adbanner", "adpopup", "adpush", "adconfig", "adlog", "adstat", "adtrack",
-    "adservice", "adplugin", "admodule", "adlibrary", "adloader",
-    "xposed_temp", "lsposed_cache", "hook_inject_data", "xp_module_cache", "lspatch_temp",
+    "adservice", "adplugin", "admodule", "adlibrary", "adloader",  "xposed_temp", "lsposed_cache", "hook_inject_data", "xp_module_cache", "lspatch_temp",
     "system_modify", "root_tool_data", "magisk_temp", "ksu_cache", "kernel_mod_dir",
     "privacy_steal", "data_crack", "illegal_access", "info_collect", "secret_monitor",
     "apk_modify", "pirate_apk", "illegal_install", "app_cracked", "patch_apk_dir",
@@ -132,10 +110,12 @@ static const char *ad_file_keywords[] = {
 };
 #define AD_FILE_KEYWORD_SIZE (sizeof(ad_file_keywords)/sizeof(ad_file_keywords[0]))
 
-// 核心工具函数（使用头文件原生定义的函数）
-static int is_app_whitelisted(const char *path) {
+// 核心工具函数（极简无冗余）
+// 1. 白名单校验（优先放行核心应用）
+static int is_whitelisted(const char *path) {
     if (!path || *path != PATH_SEPARATOR) return 0;
 
+    // 提取包名（适配 /data/data/包名/... 或 /storage/emulated/0/Android/data/包名/... 路径）
     const char *data_prefix = "/data/data/";
     const char *android_data_prefix = "/storage/emulated/0/Android/data/";
     const char *pkg_start = NULL;
@@ -145,9 +125,11 @@ static int is_app_whitelisted(const char *path) {
     } else if (strstr(path, android_data_prefix)) {
         pkg_start = path + strlen(android_data_prefix);
     } else {
+        // 系统路径直接放行（系统软件白名单）
         return (strstr(path, "/system/") || strstr(path, "/vendor/") || strstr(path, "/oem/")) ? 1 : 0;
     }
 
+    // 提取包名字符串
     char pkg_name[MAX_PACKAGE_LEN] = {0};
     size_t i = 0;
     while (pkg_start[i] && pkg_start[i] != PATH_SEPARATOR && i < MAX_PACKAGE_LEN - 1) {
@@ -156,19 +138,65 @@ static int is_app_whitelisted(const char *path) {
     }
     if (i == 0) return 0;
 
-    // 白名单匹配（优化循环，避免冗余）
-    for (size_t j = 0; j < APP_WHITELIST_SIZE; j++) {
-        if (strcmp(pkg_name, app_whitelist[j]) == 0) {
+    // 白名单匹配
+    for (size_t j = 0; j < WHITELIST_SIZE; j++) {
+        if (strcmp(pkg_name, whitelist[j]) == 0) {
             return 1;
         }
     }
     return 0;
 }
 
-static int is_risk_operation(const char *path) {
-    return is_app_whitelisted(path) ? 0 : 1;
+// 2. 风险路径判断（全应用生效）
+static int is_blocked_path(const char *path) {
+    if (!path || *path != PATH_SEPARATOR) return 0;
+
+    // 提取包名或文件夹名
+    char target_buf[MAX_PACKAGE_LEN] = {0};
+    const char *pkg_start = NULL;
+
+    // 匹配 /data/data/包名/... 路径
+    if (strstr(path, "/data/data/")) {
+        pkg_start = path + strlen("/data/data/");
+    }
+    // 匹配 /storage/emulated/0/Android/data/包名/... 路径
+    else if (strstr(path, "/storage/emulated/0/Android/data/")) {
+        pkg_start = path + strlen("/storage/emulated/0/Android/data/");
+    }
+    // 匹配风险文件夹（直接匹配路径中的文件夹名）
+    else {
+        const char *last_slash = strrchr(path, PATH_SEPARATOR);
+        if (last_slash && *(last_slash + 1)) {
+            pkg_start = last_slash + 1;
+        } else {
+            return 0;
+        }
+    }
+
+    // 提取目标字符串
+    size_t i = 0;
+    while (pkg_start[i] && pkg_start[i] != PATH_SEPARATOR && i < MAX_PACKAGE_LEN - 1) {
+        target_buf[i] = pkg_start[i];
+        i++;
+    }
+    if (i == 0) return 0;
+
+    // 风险包名校验
+    for (size_t j = 0; j < DENY_LIST_SIZE; j++) {
+        if (strcmp(target_buf, deny_list[j]) == 0) {
+            return 1;
+        }
+    }
+    // 风险文件夹校验
+    for (size_t k = 0; k < DENY_FOLDER_SIZE; k++) {
+        if (strcmp(target_buf[k]) == 0) {
+            return 1;
+        }
+    }
+    return 0;
 }
 
+// 3. 广告拦截判断（全应用生效）
 static int is_ad_blocked(const char *path) {
     if (!hma_ad_enabled || !path) return 0;
 
@@ -176,13 +204,14 @@ static int is_ad_blocked(const char *path) {
     strncpy(lower_path, path, PATH_MAX - 1);
     lower_path[PATH_MAX - 1] = '\0';
 
-    // 自定义转小写（不依赖任何头文件）
+    // 转小写匹配
     for (char *s = lower_path; *s; s++) {
         if (*s >= 'A' && *s <= 'Z') {
             *s += 32;
         }
     }
 
+    // 广告关键词匹配
     for (size_t i = 0; i < AD_FILE_KEYWORD_SIZE; i++) {
         if (strstr(lower_path, ad_file_keywords[i]) != NULL) {
             return 1;
@@ -191,107 +220,181 @@ static int is_ad_blocked(const char *path) {
     return 0;
 }
 
-// 核心拦截钩子（使用KPM头文件定义的kf_strncpy_from_user）
-static void __used before_mkdirat(hook_fargs4_t *args, void *udata) {
+// 核心拦截钩子（全应用适配，保持极简）
+static void before_mkdirat(hook_fargs4_t *args, void *udata) {
     if (!hma_running) return;
     char path[PATH_MAX];
-    // 直接使用头文件定义的kf_strncpy_from_user，无需自定义声明
-    long len = kf_strncpy_from_user(path, (void *)syscall_argn(args, 1), PATH_MAX - 1);
-    if (len <= 0) return;
+    long len = compat_strncpy_from_user(path, (void *)syscall_argn(args, 1), PATH_MAX - 1);
+    if (len <= 0 || is_whitelisted(path)) return;
     path[len] = '\0';
-    
-    if (is_risk_operation(path) || is_ad_blocked(path)) {
-        pr_warn("mkdirat deny: %s", path);
+    if (is_blocked_path(path) || is_ad_blocked(path)) {
+        pr_warn("[HMA++] mkdirat deny: %s\n", path);
         args->skip_origin = 1;
         args->ret = -EACCES;
     }
 }
 
-static void __used before_chdir(hook_fargs1_t *args, void *udata) {
+static void before_chdir(hook_fargs1_t *args, void *udata) {
     if (!hma_running) return;
     char path[PATH_MAX];
-    long len = kf_strncpy_from_user(path, (void *)syscall_argn(args, 0), PATH_MAX - 1);
-    if (len <= 0) return;
+    long len = compat_strncpy_from_user(path, (void *)syscall_argn(args, 0), PATH_MAX - 1);
+    if (len <= 0 || is_whitelisted(path)) return;
     path[len] = '\0';
-    
-    if (is_risk_operation(path) || is_ad_blocked(path)) {
-        pr_warn("chdir deny: %s", path);
+    if (is_blocked_path(path) || is_ad_blocked(path)) {
+        pr_warn("[HMA++] chdir deny: %s\n", path);
         args->skip_origin = 1;
         args->ret = -ENOENT;
     }
 }
 
-// 模块初始化（核心：符号检测+仅挂钩有效syscall）
-static long __used mkdir_hook_init(const char *args, const char *event, void *__user reserved) {
-    pr_info("===== 初始化开始（强兼容版） =====");
-
-    // 关键：检测KPM核心符号（hook_syscalln是框架入口，必须存在）
-    if (!hook_syscalln) {
-        pr_err("初始化失败：KPM未导出hook_syscalln符号！请升级KPM到1.1.0+");
-        return -EINVAL;
+#if defined(__NR_rmdir)
+static void before_rmdir(hook_fargs1_t *args, void *udata) {
+    if (!hma_running) return;
+    char path[PATH_MAX];
+    long len = compat_strncpy_from_user(path, (void *)syscall_argn(args, 0), PATH_MAX - 1);
+    if (len <= 0 || is_whitelisted(path)) return;
+    path[len] = '\0';
+    if (is_blocked_path(path) || is_ad_blocked(path)) {
+        pr_warn("[HMA++] rmdir deny: %s\n", path);
+        args->skip_origin = 1;
+        args->ret = -ENOENT;
     }
+}
+#endif
 
-    // 仅挂钩存在的syscall（避免无效挂钩导致加载失败）
-    if (__NR_mkdirat > 0) {
-        hook_err_t err = hook_syscalln(__NR_mkdirat, 3, before_mkdirat, NULL, NULL);
-        if (err) pr_err("挂钩mkdirat失败：err=%d", err);
-        else pr_info("挂钩mkdirat成功");
-    } else {
-        pr_warn("跳过mkdirat挂钩：内核无此syscall");
+#if defined(__NR_unlinkat)
+static void before_unlinkat(hook_fargs4_t *args, void *udata) {
+    if (!hma_running) return;
+    char path[PATH_MAX];
+    long len = compat_strncpy_from_user(path, (void *)syscall_argn(args, 1), PATH_MAX - 1);
+    if (len <= 0 || is_whitelisted(path)) return;
+    path[len] = '\0';
+    if (is_blocked_path(path) || is_ad_blocked(path)) {
+        pr_warn("[HMA++] unlinkat deny: %s\n", path);
+        args->skip_origin = 1;
+        args->ret = -ENOENT;
     }
+}
+#endif
 
-    if (__NR_chdir > 0) {
-        hook_err_t err = hook_syscalln(__NR_chdir, 1, before_chdir, NULL, NULL);
-        if (err) pr_err("挂钩chdir失败：err=%d", err);
-        else pr_info("挂钩chdir成功");
-    } else {
-        pr_warn("跳过chdir挂钩：内核无此syscall");
+#ifdef __NR_openat
+static void before_openat(hook_fargs5_t *args, void *udata) {
+    if (!hma_running) return;
+    char path[PATH_MAX];
+    long len = compat_strncpy_from_user(path, (void *)syscall_argn(args, 1), PATH_MAX - 1);
+    if (len <= 0 || is_whitelisted(path)) return;
+    path[len] = '\0';
+    if (is_blocked_path(path) || is_ad_blocked(path)) {
+        pr_warn("[HMA++] openat deny: %s\n", path);
+        args->skip_origin = 1;
+        args->ret = -ENOENT;
     }
+}
+#endif
 
-    pr_info("初始化完成！全局拦截：%s，广告拦截：%s",
-            hma_running ? "开启" : "关闭", hma_ad_enabled ? "开启" : "关闭");
+#ifdef __NR_renameat
+static void before_renameat(hook_fargs4_t *args, void *udata) {
+    if (!hma_running) return;
+    char old_path[PATH_MAX], new_path[PATH_MAX];
+    long len_old = compat_strncpy_from_user(old_path, (void *)syscall_argn(args, 1), PATH_MAX - 1);
+    long len_new = compat_strncpy_from_user(new_path, (void *)syscall_argn(args, 3), PATH_MAX - 1);
+    if (len_old <= 0 || len_new <= 0) return;
+    old_path[len_old] = '\0';
+    new_path[len_new] = '\0';
+
+    // 白名单校验（任一路径在白名单即放行）
+    if (is_whitelisted(old_path) || is_whitelisted(new_path)) return;
+
+    if (is_blocked_path(old_path) || is_blocked_path(new_path) || is_ad_blocked(old_path) || is_ad_blocked(new_path)) {
+        pr_warn("[HMA++] renameat deny: %s -> %s\n", old_path, new_path);
+        args->skip_origin = 1;
+        args->ret = -ENOENT;
+    }
+}
+#endif
+
+// 模块生命周期（极简无冗余）
+static long mkdir_hook_init(const char *args, const char *event, void *__user reserved) {
+    hook_err_t err;
+    pr_info("[HMA++] init start (全应用拦截+核心白名单)\n");
+
+    // 挂钩核心文件操作syscall
+    err = hook_syscalln(__NR_mkdirat, 3, before_mkdirat, NULL, NULL);
+    if (err) { pr_err("[HMA++] hook mkdirat err: %d\n", err); return -EINVAL; }
+    err = hook_syscalln(__NR_chdir, 1, before_chdir, NULL, NULL);
+    if (err) { pr_err("[HMA++] hook chdir err: %d\n", err); return -EINVAL; }
+#if defined(__NR_rmdir)
+    hook_syscalln(__NR_rmdir, 1, before_rmdir, NULL, NULL);
+#endif
+#if defined(__NR_unlinkat)
+    hook_syscalln(__NR_unlinkat, 4, before_unlinkat, NULL, NULL);
+#endif
+#ifdef __NR_openat
+    hook_syscalln(__NR_openat, 5, before_openat, NULL, NULL);
+#endif
+#ifdef __NR_renameat
+    hook_syscalln(__NR_renameat, 4, before_renameat, NULL, NULL);
+#endif
+
+    pr_info("[HMA++] init success (global: %d, ad: %d)\n", hma_running, hma_ad_enabled);
     return 0;
 }
 
-// 控制接口（使用头文件原生的compat_copy_to_user，匹配类型）
-static long __used hma_control0(const char *args, char *__user out_msg, int outlen) {
-    char msg[64] = "参数错误：使用'0/1,0/1'（全局,广告）";
-    if (args && strlen(args) >= 3 && strchr(args, ARG_SEPARATOR)) {
-        char global_arg = args[0];
-        char ad_arg = args[2];
-        if ((global_arg == '0' || global_arg == '1') && (ad_arg == '0' || ad_arg == '1')) {
-            hma_running = (global_arg == '1');
-            hma_ad_enabled = (ad_arg == '1');
-            snprintf(msg, sizeof(msg)-1, "全局：%s，广告：%s",
-                     hma_running ? "开启" : "关闭", hma_ad_enabled ? "开启" : "关闭");
-        }
+// 启停控制（双开关参数："总开关,广告开关" 如 "1,1"）
+static long hma_control0(const char *args, char *__user out_msg, int outlen) {
+    char msg[64] = {0};
+    if (!args || strlen(args) < 3 || strchr(args, ARG_SEPARATOR) == NULL) {
+        strncpy(msg, "args err: use '0/1,0/1' (global,ad)", sizeof(msg)-1);
+        goto out_copy;
     }
 
-    // 直接调用头文件定义的compat_copy_to_user，参数类型匹配（n为int）
+    char global_arg = args[0];
+    char ad_arg = args[2];
+    if ((global_arg != '0' && global_arg != '1') || (ad_arg != '0' && ad_arg != '1')) {
+        strncpy(msg, "args err: only 0/1 allowed", sizeof(msg)-1);
+        goto out_copy;
+    }
+
+    hma_running = (global_arg == '1');
+    hma_ad_enabled = (ad_arg == '1');
+    snprintf(msg, sizeof(msg)-1, "global: %s, ad: %s",
+             hma_running ? "enabled" : "disabled",
+             hma_ad_enabled ? "enabled" : "disabled");
+
+out_copy:
     if (outlen >= strlen(msg) + 1) {
         compat_copy_to_user(out_msg, msg, strlen(msg) + 1);
     }
     return 0;
 }
 
-static long __used hma_control1(void *a1, void *a2, void *a3) {
+// 预留控制接口（极简实现）
+static long hma_control1(void *a1, void *a2, void *a3) {
     return 0;
 }
 
-// 模块退出（安全解钩）
-static long __used mkdir_hook_exit(void *__user reserved) {
-    pr_info("===== 退出模块 =====");
-    if (hook_syscalln && __NR_mkdirat > 0) {
-        unhook_syscalln(__NR_mkdirat, before_mkdirat, NULL);
-    }
-    if (hook_syscalln && __NR_chdir > 0) {
-        unhook_syscalln(__NR_chdir, before_chdir, NULL);
-    }
-    pr_info("退出成功");
+// 模块退出（极简解钩）
+static long mkdir_hook_exit(void *__user reserved) {
+    pr_info("[HMA++] exit start\n");
+    unhook_syscalln(__NR_mkdirat, before_mkdirat, NULL);
+    unhook_syscalln(__NR_chdir, before_chdir, NULL);
+#if defined(__NR_rmdir)
+    unhook_syscalln(__NR_rmdir, before_rmdir, NULL);
+#endif
+#if defined(__NR_unlinkat)
+    unhook_syscalln(__NR_unlinkat, before_unlinkat, NULL);
+#endif
+#ifdef __NR_openat
+    unhook_syscalln(__NR_openat, before_openat, NULL);
+#endif
+#ifdef __NR_renameat
+    unhook_syscalln(__NR_renameat, before_renameat, NULL);
+#endif
+    pr_info("[HMA++] exit success\n");
     return 0;
 }
 
-// KPM注册（确保宏无语法错误）
+// 模块注册（符合KPM规范）
 KPM_INIT(mkdir_hook_init);
 KPM_CTL0(hma_control0);
 KPM_CTL1(hma_control1);
