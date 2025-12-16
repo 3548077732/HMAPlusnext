@@ -13,7 +13,7 @@
 
 // 模块元信息
 KPM_NAME("HMA++ Next");
-KPM_VERSION("1.0.9");
+KPM_VERSION("1.0.10");
 KPM_LICENSE("GPLv3");
 KPM_AUTHOR("NightFallsLikeRain");
 KPM_DESCRIPTION("全应用风险+广告拦截（含微信/QQ/银行/系统软件白名单）");
@@ -27,7 +27,7 @@ KPM_DESCRIPTION("全应用风险+广告拦截（含微信/QQ/银行/系统软件
 static bool hma_running = true;        // 总开关
 static bool hma_ad_enabled = true;     // 广告拦截独立开关
 
-// 核心白名单（QQ/微信/系统软件/常用银行，无冗余）
+// 核心白名单（QQ/微信/系统软件/常用银行等，白名单内应用不受风险拦截限制）
 static const char *whitelist[] = {
     "com.tencent.mm", "com.tencent.mobileqq", "com.tencent.minihd.qq", "com.tencent.wework",
     // 系统基础软件
@@ -42,7 +42,7 @@ static const char *whitelist[] = {
     "com.xiaomi.misettings", "com.huawei.systemmanager", "com.oppo.launcher", "com.vivo.launcher",
     "com.samsung.android.launcher", "com.meizu.flyme.launcher", "me.bmax.apatch", "com.larus.nova",
     "com.miui.home", "com.sukisu.ultra",
-    // 原风险名单（用户添加的白名单）
+    // 原风险名单（用户添加的白名单，不受风险拦截）
     "com.silverlab.app.deviceidchanger.free", "me.bingyue.IceCore", "com.modify.installer", "o.dyoo",
     "com.zhufucdev.motion_emulator", "com.xiaomi.shop", "com.demo.serendipity", "me.iacn.biliroaming",
     "me.teble.xposed.autodaily", "com.example.ourom", "dialog.box", "tornaco.apps.shortx",
@@ -73,14 +73,9 @@ static const char *whitelist[] = {
 };
 #define WHITELIST_SIZE (sizeof(whitelist)/sizeof(whitelist[0]))
 
-// 1.风险拦截黑名单（精简高效）
-static const char *deny_list[] = {
-};
-#define DENY_LIST_SIZE (sizeof(deny_list)/sizeof(deny_list[0]))
-
-// 风险文件夹黑名单（全路径匹配）
+// 风险文件夹黑名单（仅对白名单外应用生效）
 static const char *deny_folder_list[] = {
-      "xposed_temp", "lsposed_cache", "hook_inject_data", "xp_module_cache", "lspatch_temp",
+    "xposed_temp", "lsposed_cache", "hook_inject_data", "xp_module_cache", "lspatch_temp",
     "system_modify", "root_tool_data", "magisk_temp", "ksu_cache", "kernel_mod_dir",
     "privacy_steal", "data_crack", "illegal_access", "info_collect", "secret_monitor",
     "apk_modify", "pirate_apk", "illegal_install", "app_cracked", "patch_apk_dir",
@@ -93,24 +88,15 @@ static const char *deny_folder_list[] = {
 };
 #define DENY_FOLDER_SIZE (sizeof(deny_folder_list)/sizeof(deny_folder_list[0]))
 
-// 2.广告拦截黑名单（全路径关键词匹配）
+// 广告拦截黑名单（对所有应用生效，包括白名单内）
 static const char *ad_file_keywords[] = {
     "ad_", "_ad.", "ads_", "_ads.", "advertise", "adcache", "adimg", "advideo",
     "adbanner", "adpopup", "adpush", "adconfig", "adlog", "adstat", "adtrack",
-    "adservice", "adplugin", "admodule", "adlibrary", "adloader",  "xposed_temp", "lsposed_cache", "hook_inject_data", "xp_module_cache", "lspatch_temp",
-    "system_modify", "root_tool_data", "magisk_temp", "ksu_cache", "kernel_mod_dir",
-    "privacy_steal", "data_crack", "illegal_access", "info_collect", "secret_monitor",
-    "apk_modify", "pirate_apk", "illegal_install", "app_cracked", "patch_apk_dir",
-    "risk_temp", "unsafe_operation", "malicious_dir", "temp_hack", "unsafe_cache",
-    "termux_data", "apktool_temp", "reverse_engineer", "hack_tool_data", "crack_tool_dir",
-    "emulator_data", "virtual_env", "fake_device", "emulator_cache", "virtual_device",
-    "ad_plugin", "malicious_plugin", "ad_cache", "plugin_hack", "ad_inject",
-    "data_modify", "crack_data", "modify_logs", "crack_cache", "data_hack",
-    "tool_residue", "illegal_backup", "hack_residue", "backup_crack", "tool_cache"
+    "adservice", "adplugin", "admodule", "adlibrary", "adloader"
 };
 #define AD_FILE_KEYWORD_SIZE (sizeof(ad_file_keywords)/sizeof(ad_file_keywords[0]))
 
-// 核心工具函数（极简无冗余）
+// 核心工具函数（关键调整：风险拦截仅对白名单外应用生效）
 // 1. 白名单校验（优先放行核心应用）
 static int is_whitelisted(const char *path) {
     if (!path || *path != PATH_SEPARATOR) return 0;
@@ -125,7 +111,7 @@ static int is_whitelisted(const char *path) {
     } else if (strstr(path, android_data_prefix)) {
         pkg_start = path + strlen(android_data_prefix);
     } else {
-        // 系统路径直接放行（系统软件白名单）
+        // 系统路径直接放行（不受风险拦截）
         return (strstr(path, "/system/") || strstr(path, "/vendor/") || strstr(path, "/oem/")) ? 1 : 0;
     }
 
@@ -138,7 +124,7 @@ static int is_whitelisted(const char *path) {
     }
     if (i == 0) return 0;
 
-    // 白名单匹配
+    // 白名单匹配：命中则放行（不受风险拦截）
     for (size_t j = 0; j < WHITELIST_SIZE; j++) {
         if (strcmp(pkg_name, whitelist[j]) == 0) {
             return 1;
@@ -147,56 +133,37 @@ static int is_whitelisted(const char *path) {
     return 0;
 }
 
-// 2. 风险路径判断（全应用生效）
+// 2. 风险路径判断（核心调整：仅对白名单外应用生效）
 static int is_blocked_path(const char *path) {
+    // 白名单内应用/系统路径：直接放行，不触发风险拦截
+    if (is_whitelisted(path)) return 0;
+
     if (!path || *path != PATH_SEPARATOR) return 0;
 
-    // 提取包名或文件夹名
+    // 提取路径中的文件夹名（匹配风险文件夹）
     char target_buf[MAX_PACKAGE_LEN] = {0};
-    const char *pkg_start = NULL;
+    const char *last_slash = strrchr(path, PATH_SEPARATOR);
+    if (!last_slash || !*(last_slash + 1)) return 0;
 
-    // 匹配 /data/data/包名/... 路径
-    if (strstr(path, "/data/data/")) {
-        pkg_start = path + strlen("/data/data/");
-    }
-    // 匹配 /storage/emulated/0/Android/data/包名/... 路径
-    else if (strstr(path, "/storage/emulated/0/Android/data/")) {
-        pkg_start = path + strlen("/storage/emulated/0/Android/data/");
-    }
-    // 匹配风险文件夹（直接匹配路径中的文件夹名）
-    else {
-        const char *last_slash = strrchr(path, PATH_SEPARATOR);
-        if (last_slash && *(last_slash + 1)) {
-            pkg_start = last_slash + 1;
-        } else {
-            return 0;
-        }
-    }
-
-    // 提取目标字符串
+    // 提取最后一级文件夹名（如 "/data/test/xposed_temp" → "xposed_temp"）
+    const char *folder_name = last_slash + 1;
     size_t i = 0;
-    while (pkg_start[i] && pkg_start[i] != PATH_SEPARATOR && i < MAX_PACKAGE_LEN - 1) {
-        target_buf[i] = pkg_start[i];
+    while (folder_name[i] && folder_name[i] != PATH_SEPARATOR && i < MAX_PACKAGE_LEN - 1) {
+        target_buf[i] = folder_name[i];
         i++;
     }
     if (i == 0) return 0;
 
-    // 风险包名校验
-    for (size_t j = 0; j < DENY_LIST_SIZE; j++) {
-        if (strcmp(target_buf, deny_list[j]) == 0) {
-            return 1;
-        }
-    }
-    // 风险文件夹校验
+    // 风险文件夹匹配（仅对白名单外应用生效）
     for (size_t k = 0; k < DENY_FOLDER_SIZE; k++) {
-        if (strcmp(target_buf[k]) == 0) {
+        if (strcmp(target_buf, deny_folder_list[k]) == 0) {
             return 1;
         }
     }
     return 0;
 }
 
-// 3. 广告拦截判断（全应用生效）
+// 3. 广告拦截判断（对所有应用生效，保持不变）
 static int is_ad_blocked(const char *path) {
     if (!hma_ad_enabled || !path) return 0;
 
@@ -211,7 +178,7 @@ static int is_ad_blocked(const char *path) {
         }
     }
 
-    // 广告关键词匹配
+    // 广告关键词匹配（所有应用均拦截）
     for (size_t i = 0; i < AD_FILE_KEYWORD_SIZE; i++) {
         if (strstr(lower_path, ad_file_keywords[i]) != NULL) {
             return 1;
@@ -220,15 +187,17 @@ static int is_ad_blocked(const char *path) {
     return 0;
 }
 
-// 核心拦截钩子（全应用适配，保持极简）
+// 核心拦截钩子（逻辑：白名单外应用+风险路径 → 拦截；所有应用+广告路径 → 拦截）
 static void before_mkdirat(hook_fargs4_t *args, void *udata) {
     if (!hma_running) return;
     char path[PATH_MAX];
     long len = compat_strncpy_from_user(path, (void *)syscall_argn(args, 1), PATH_MAX - 1);
-    if (len <= 0 || is_whitelisted(path)) return;
+    if (len <= 0) return;
     path[len] = '\0';
+    
+    // 拦截条件：白名单外应用触发风险路径，或所有应用触发广告路径
     if (is_blocked_path(path) || is_ad_blocked(path)) {
-        pr_warn("[HMA++] mkdirat deny: %s\n", path);
+        pr_warn("[HMA++] mkdirat deny: %s (白名单外应用风险拦截/广告拦截)\n", path);
         args->skip_origin = 1;
         args->ret = -EACCES;
     }
@@ -238,10 +207,11 @@ static void before_chdir(hook_fargs1_t *args, void *udata) {
     if (!hma_running) return;
     char path[PATH_MAX];
     long len = compat_strncpy_from_user(path, (void *)syscall_argn(args, 0), PATH_MAX - 1);
-    if (len <= 0 || is_whitelisted(path)) return;
+    if (len <= 0) return;
     path[len] = '\0';
+    
     if (is_blocked_path(path) || is_ad_blocked(path)) {
-        pr_warn("[HMA++] chdir deny: %s\n", path);
+        pr_warn("[HMA++] chdir deny: %s (白名单外应用风险拦截/广告拦截)\n", path);
         args->skip_origin = 1;
         args->ret = -ENOENT;
     }
@@ -252,10 +222,11 @@ static void before_rmdir(hook_fargs1_t *args, void *udata) {
     if (!hma_running) return;
     char path[PATH_MAX];
     long len = compat_strncpy_from_user(path, (void *)syscall_argn(args, 0), PATH_MAX - 1);
-    if (len <= 0 || is_whitelisted(path)) return;
+    if (len <= 0) return;
     path[len] = '\0';
+    
     if (is_blocked_path(path) || is_ad_blocked(path)) {
-        pr_warn("[HMA++] rmdir deny: %s\n", path);
+        pr_warn("[HMA++] rmdir deny: %s (白名单外应用风险拦截/广告拦截)\n", path);
         args->skip_origin = 1;
         args->ret = -ENOENT;
     }
@@ -267,10 +238,11 @@ static void before_unlinkat(hook_fargs4_t *args, void *udata) {
     if (!hma_running) return;
     char path[PATH_MAX];
     long len = compat_strncpy_from_user(path, (void *)syscall_argn(args, 1), PATH_MAX - 1);
-    if (len <= 0 || is_whitelisted(path)) return;
+    if (len <= 0) return;
     path[len] = '\0';
+    
     if (is_blocked_path(path) || is_ad_blocked(path)) {
-        pr_warn("[HMA++] unlinkat deny: %s\n", path);
+        pr_warn("[HMA++] unlinkat deny: %s (白名单外应用风险拦截/广告拦截)\n", path);
         args->skip_origin = 1;
         args->ret = -ENOENT;
     }
@@ -282,10 +254,11 @@ static void before_openat(hook_fargs5_t *args, void *udata) {
     if (!hma_running) return;
     char path[PATH_MAX];
     long len = compat_strncpy_from_user(path, (void *)syscall_argn(args, 1), PATH_MAX - 1);
-    if (len <= 0 || is_whitelisted(path)) return;
+    if (len <= 0) return;
     path[len] = '\0';
+    
     if (is_blocked_path(path) || is_ad_blocked(path)) {
-        pr_warn("[HMA++] openat deny: %s\n", path);
+        pr_warn("[HMA++] openat deny: %s (白名单外应用风险拦截/广告拦截)\n", path);
         args->skip_origin = 1;
         args->ret = -ENOENT;
     }
@@ -302,21 +275,19 @@ static void before_renameat(hook_fargs4_t *args, void *udata) {
     old_path[len_old] = '\0';
     new_path[len_new] = '\0';
 
-    // 白名单校验（任一路径在白名单即放行）
-    if (is_whitelisted(old_path) || is_whitelisted(new_path)) return;
-
+    // 任一路径触发拦截条件即拦截
     if (is_blocked_path(old_path) || is_blocked_path(new_path) || is_ad_blocked(old_path) || is_ad_blocked(new_path)) {
-        pr_warn("[HMA++] renameat deny: %s -> %s\n", old_path, new_path);
+        pr_warn("[HMA++] renameat deny: %s -> %s (白名单外应用风险拦截/广告拦截)\n", old_path, new_path);
         args->skip_origin = 1;
         args->ret = -ENOENT;
     }
 }
 #endif
 
-// 模块生命周期（极简无冗余）
+// 模块生命周期（保持极简）
 static long mkdir_hook_init(const char *args, const char *event, void *__user reserved) {
     hook_err_t err;
-    pr_info("[HMA++] init start (全应用拦截+核心白名单)\n");
+    pr_info("[HMA++] init start (风险拦截仅对白名单外应用生效)\n");
 
     // 挂钩核心文件操作syscall
     err = hook_syscalln(__NR_mkdirat, 3, before_mkdirat, NULL, NULL);
@@ -336,7 +307,7 @@ static long mkdir_hook_init(const char *args, const char *event, void *__user re
     hook_syscalln(__NR_renameat, 4, before_renameat, NULL, NULL);
 #endif
 
-    pr_info("[HMA++] init success (global: %d, ad: %d)\n", hma_running, hma_ad_enabled);
+    pr_info("[HMA++] init success (global: %d, ad: %d) - 白名单内应用不受风险拦截限制\n", hma_running, hma_ad_enabled);
     return 0;
 }
 
@@ -357,7 +328,7 @@ static long hma_control0(const char *args, char *__user out_msg, int outlen) {
 
     hma_running = (global_arg == '1');
     hma_ad_enabled = (ad_arg == '1');
-    snprintf(msg, sizeof(msg)-1, "global: %s, ad: %s",
+    snprintf(msg, sizeof(msg)-1, "global: %s, ad: %s (风险仅拦截白名单外应用)",
              hma_running ? "enabled" : "disabled",
              hma_ad_enabled ? "enabled" : "disabled");
 
