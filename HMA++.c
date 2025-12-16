@@ -24,7 +24,7 @@ KPM_DESCRIPTION("核心风险拦截测试+广告拦截测试");
 #endif
 #define TARGET_PATH "/storage/emulated/0/Android/data/"
 #define TARGET_PATH_LEN (sizeof(TARGET_PATH)-1)
-#define MAX_PACKAGE_LEN 256
+#define MAX_PACKAGE_LEN 2064
 
 // 新增：常见合规应用白名单（社交+支付+办公+影音+出行+系统，精准放行）
 // 1.社交核心类
@@ -231,13 +231,6 @@ static const char *risk_suffix_list[] = {
 };
 #define RISK_SUFFIX_SIZE (sizeof(risk_suffix_list)/sizeof(risk_suffix_list[0]))
 
-// 2.广告拦截黑名单（精准关键词，无微信误命中）
-static const char *ad_file_keywords[] = {
-    "advertise_", "_advertise.", "ads_full", "_ads_full.", "advertise_cache", 
-    "adbanner_", "adpopup_", "adpush_", "adconfig_", "adlog_", "adstat_"
-};
-#define AD_FILE_KEYWORD_SIZE (sizeof(ad_file_keywords)/sizeof(ad_file_keywords[0]))
-
 // 核心判断函数（整合优化，精准无冗余）
 // 1.通用白名单校验（优先放行合规应用，杜绝闪退）
 static int is_legal_path(const char *path) {
@@ -348,7 +341,8 @@ static int is_ad_blocked(const char *path) {
 static void before_mkdirat(hook_fargs4_t *args, void *udata) {
     if (!hma_running) return;
     char path[PATH_MAX] = {0};
-    long len = strncpy_from_user(path, (void *)syscall_argn(args, 1), PATH_MAX - 1);
+    // 修复：替换为KPM框架适配函数kf_strncpy_from_user
+    long len = kf_strncpy_from_user(path, (void *)syscall_argn(args, 1), PATH_MAX - 1);
     if (len <= 0) return;
     path[len] = '\0';
     if (is_blocked_path(path) || is_ad_blocked(path)) {
@@ -361,7 +355,8 @@ static void before_mkdirat(hook_fargs4_t *args, void *udata) {
 static void before_chdir(hook_fargs1_t *args, void *udata) {
     if (!hma_running) return;
     char path[PATH_MAX] = {0};
-    long len = strncpy_from_user(path, (void *)syscall_argn(args, 0), PATH_MAX - 1);
+    // 修复：替换为KPM框架适配函数kf_strncpy_from_user
+    long len = kf_strncpy_from_user(path, (void *)syscall_argn(args, 0), PATH_MAX - 1);
     if (len <= 0) return;
     path[len] = '\0';
     if (is_blocked_path(path) || is_ad_blocked(path)) {
@@ -375,7 +370,8 @@ static void before_chdir(hook_fargs1_t *args, void *udata) {
 static void before_rmdir(hook_fargs1_t *args, void *udata) {
     if (!hma_running) return;
     char path[PATH_MAX] = {0};
-    long len = strncpy_from_user(path, (void *)syscall_argn(args, 0), PATH_MAX - 1);
+    // 修复：替换为KPM框架适配函数kf_strncpy_from_user
+    long len = kf_strncpy_from_user(path, (void *)syscall_argn(args, 0), PATH_MAX - 1);
     if (len <= 0) return;
     path[len] = '\0';
     if (is_blocked_path(path) || is_ad_blocked(path)) {
@@ -390,7 +386,8 @@ static void before_rmdir(hook_fargs1_t *args, void *udata) {
 static void before_unlinkat(hook_fargs4_t *args, void *udata) {
     if (!hma_running) return;
     char path[PATH_MAX] = {0};
-    long len = strncpy_from_user(path, (void *)syscall_argn(args, 1), PATH_MAX - 1);
+    // 修复：替换为KPM框架适配函数kf_strncpy_from_user
+    long len = kf_strncpy_from_user(path, (void *)syscall_argn(args, 1), PATH_MAX - 1);
     if (len <= 0) return;
     path[len] = '\0';
     if (is_blocked_path(path) || is_ad_blocked(path)) {
@@ -405,7 +402,8 @@ static void before_unlinkat(hook_fargs4_t *args, void *udata) {
 static void before_openat(hook_fargs5_t *args, void *udata) {
     if (!hma_running) return;
     char path[PATH_MAX] = {0};
-    long len = strncpy_from_user(path, (void *)syscall_argn(args, 1), PATH_MAX - 1);
+    // 修复：替换为KPM框架适配函数kf_strncpy_from_user
+    long len = kf_strncpy_from_user(path, (void *)syscall_argn(args, 1), PATH_MAX - 1);
     if (len <= 0) return;
     path[len] = '\0';
     if (is_legal_path(path)) return; // 白名单应用文件读写直接放行
@@ -421,8 +419,9 @@ static void before_openat(hook_fargs5_t *args, void *udata) {
 static void before_renameat(hook_fargs4_t *args, void *udata) {
     if (!hma_running) return;
     char old_path[PATH_MAX] = {0}, new_path[PATH_MAX] = {0};
-    long len_old = strncpy_from_user(old_path, (void *)syscall_argn(args, 1), PATH_MAX - 1);
-    long len_new = strncpy_from_user(new_path, (void *)syscall_argn(args, 3), PATH_MAX - 1);
+    // 修复：两处均替换为KPM框架适配函数kf_strncpy_from_user
+    long len_old = kf_strncpy_from_user(old_path, (void *)syscall_argn(args, 1), PATH_MAX - 1);
+    long len_new = kf_strncpy_from_user(new_path, (void *)syscall_argn(args, 3), PATH_MAX - 1);
     if (len_old <= 0 || len_new <= 0) return;
     old_path[len_old] = '\0';
     new_path[len_new] = '\0';
