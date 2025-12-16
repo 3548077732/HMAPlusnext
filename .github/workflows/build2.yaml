@@ -21,8 +21,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      # 新增：允许访问 GitHub API（用于获取 KPM 最新版本）
-      id-token: write
 
     steps:
       - name: 🔍 检出代码（包含源码 HMA++.c）
@@ -30,10 +28,157 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: 📋 输出系统信息（便于调试）
+      - name: 📋 网络测试（镜像源连通性）
         run: |
           echo "========================================"
           echo "系统信息："
+          uname -a
+          lsb_release -a
+          echo "========================================"
+          echo "网络连通性测试（绕开 GitHub，测试 Gitee）："
+          ping -c 2 gitee.com  # 测试 Gitee 连通性（镜像源）
+          if [ $? -ne 0 ]; then
+            echo "⚠️  Gitee 也无法访问，尝试公共 DNS 解析..."
+            echo "nameserver 8.8.8.8" | sudo tee -a /etc/resolv.conf
+            ping -c 2 gitee.com || {
+              echo "❌ 所有镜像源都无法访问！请检查网络环境！";
+              exit 1;
+            }
+          fi
+          echo "✅ Gitee 镜像源连通正常！"
+          echo "========================================"
+
+      - name: 🛠️ 安装编译依赖（内核头文件+镜像源适配）
+        run: |
+          sudo apt update -y || { echo "❌ apt更新失败！"; exit 1; }
+          # 安装核心依赖（含 wget+jq）
+          sudo apt install -y gcc make libelf-dev bc flex bison dwarves wget jq --fix-missing || { echo "❌ 核心依赖安装失败！"; exit 1; }
+          
+          # 处理内核头文件（确保匹配）
+          if [ -n "${{ github.event.inputs.kernel_version }}" ]; then
+            KERNEL_VER="${{ github.event.inputs.kernel_version }}"
+            sudo apt install -y linux-headers-${KERNEL_VER} linux-image-${KERNEL_VER} || {
+              echo "❌ 安装指定内核（${KERNEL_VER}）头文件失败！";
+              echo "ℹ️  可用内核版本：$(apt-cache search linux-headers- | grep -E '^linux-headers-[0-9.]+-generic' | sort -V | tail -5)";
+              exit 1;
+            }
+          else
+            KERNEL_VER=$(uname -r)
+            sudo apt install -y linux-headers-${KERNEL_VER} || {
+              echo "❌ 安装当前内核（${KERNEL_VER}）头文件失败！";
+              echo "ℹ️  尝试通用内核头文件...";
+              sudo apt install -y linux-headers-generic || { echo "❌ 通用内核头文件安装失败！"; exit 1; }
+              KERNEL_VER="generic"
+            }
+          fi
+          echo "✅ 内核头文件安装完成（版本：${KERNEL_VER}）"
+
+          # 核心修复：完全使用 Gitee 镜像源（绕开 GitHub）
+          echo "📌 从 Gitee 镜像获取 KPM（避免 GitHub 网络限制）..."
+          # Gitee 镜像源（KPM 官方 GitHub 仓库的镜像，同步更新）
+          KPM_GITEE_REPO="https://gitee.com/mirrors/kpm.git"
+          KPM_GITEE_RELEASE_URL="https://gitee.com/mirrors/kpm/releases/download/v1.1.0/kpm-linux-amd64"
+
+          # 方案1：优先下载 Gitee 预编译二进制（最快）
+          echo "📌 尝试方案1：下载 Gitee 预编译二进制..."
+          wget -v -t 3 -T 30 --no-check-certificate -O /tmp/kpm "${KPM_GITEE_RELEASE_URL}" || {
+            echo "⚠️  方案1失败，尝试方案2：克隆 Gitee 镜像仓库编译..."
+            # 方案2：克隆 Gitee 镜像仓库（--depth 1 快速克隆）
+            git clone --depth 1 "${KPM_GITEE_REPO}" /tmp/kpm-repo || {
+              echo "⚠️  方案2失败，尝试方案3：使用 Gitee 加速链接..."
+              # 方案3：Gitee 加速下载（备用链接）
+              KPM_GITEE_ACCEL_URL="https://gitee.com/mirrors/kpm/raw/v1.1.0/kpm-linux-amd64"
+              wget -v -t 3 -T 30 --no-check-certificate -O /tmp/kpm "${KPM_GITEE_ACCEL_URL}" || {
+                echo "❌ 所有 Gitee 方案都失败！使用离线备用方案...";
+                # 方案4：离线备用（直接在仓库中放置 KPM 二进制，这里假设已上传到仓库根目录）
+                if [ -f "./kpm-linux-amd64" ]; then
+                  cp ./kpm-linux-amd64 /tmp/kpm
+                  chmod +x /tmp/kpm
+                else
+                  echo "❌ 离线备用方案也失败！请手动上传 kpm-linux-amd64 到仓库根目录！";
+                  exit 1;
+                fi
+              }
+            }
+            # 方案2后续：编译 Gitee 克隆的源码
+            if [ -d "/tmp/kpm-repo" ]; then
+              cd /tmp/kpm-repo && make -j$(nproc) && sudo mv kpm /usr/local/bin/ || {
+                echo "❌ 方案2编译失败！";
+                exit 1;
+              }
+            fi
+          }
+
+          # 安装 KPM（方案1/3/4 成功后的处理）
+          if [ -f "/tmp/kpm" ]; then
+            chmod +x /tmp/kpm
+            sudo mv /tmp/kpm /usr/local/bin/
+          fi
+
+          # 验证 KPM 安装
+          if ! command -v kpm &> /dev/null; then
+            echo "❌ KPM 工具安装失败！"; exit 1;
+          fi
+          KPM_INSTALLED_VER=$(kpm --version | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' || echo "unknown")
+          echo "✅ KPM 工具安装成功（版本：${KPM_INSTALLED_VER}，来源：Gitee 镜像）"
+
+      - name: ⚙️ 配置构建参数
+        run: |
+          if [ "${{ github.event.inputs.build_mode }}" = "debug" ]; then
+            echo "EXTRA_CFLAGS=-g -Wall -Wextra" >> $GITHUB_ENV
+            echo "📌 已启用 debug 模式（保留调试信息+详细警告）"
+          else
+            echo "EXTRA_CFLAGS=-O2 -Wall -Wno-unused-parameter" >> $GITHUB_ENV
+            echo "📌 已启用 release 模式（优化性能+抑制冗余警告）"
+          fi
+
+      - name: 🚀 编译源码（详细日志）
+        run: |
+          if [ ! -f "HMA++.c" ]; then echo "❌ 未找到源码 HMA++.c！"; exit 1; fi
+          make clean || echo "ℹ️  无旧产物可清理"
+          echo "📌 编译参数：${{ env.EXTRA_CFLAGS }}"
+          make -j$(nproc) VERBOSE=1 EXTRA_CFLAGS="${{ env.EXTRA_CFLAGS }}" || {
+            echo "❌ 编译失败！查看详细日志排查问题";
+            exit 1;
+          }
+          if [ ! -f "HMA++.o" ]; then echo "❌ 未生成 HMA++.o！"; exit 1; fi
+          if [ ! -f "HMA_Next.ko" ]; then echo "❌ 未生成 HMA_Next.ko！"; exit 1; fi
+          echo "📌 模块信息："
+          modinfo HMA_Next.ko | grep -E "filename|version|author|license" || echo "⚠️  模块信息读取警告"
+          echo "✅ 编译成功！"
+
+      - name: 📦 打包 KPM 模块
+        run: |
+          make package VERBOSE=1 || { echo "❌ 打包失败！"; exit 1; }
+          if [ ! -f "HMA++.kpm" ]; then echo "❌ 未生成 HMA++.kpm！"; exit 1; fi
+          kpm info HMA++.kpm || echo "⚠️  KPM 信息读取警告"
+          ls -lH HMA++.kpm
+          echo "✅ 打包成功！"
+
+      - name: 📤 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: HMA++-Next-KPM-${{ github.event.inputs.build_mode }}-${KERNEL_VER}
+          path: |
+            HMA++.c
+            HMA++.o
+            HMA_Next.ko
+            HMA++.kpm
+            Makefile
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: 📝 构建报告
+        run: |
+          KERNEL_DISPLAY=$(if [ -n "${{ github.event.inputs.kernel_version }}" ]; then echo "${{ github.event.inputs.kernel_version }}"; else echo "默认（$(uname -r)）"; fi)
+          echo "========================================"
+          echo "✅ HMA++ Next KPM 模块构建成功！"
+          echo "📌 源码：HMA++.c"
+          echo "📌 构建模式：${{ github.event.inputs.build_mode }}"
+          echo "📌 内核版本：${KERNEL_DISPLAY}"
+          echo "📌 KPM 来源：Gitee 镜像（版本：${KPM_INSTALLED_VER}）"
+          echo "📌 产物：HMA++.kpm（大小：$(du -sh HMA++.kpm | awk '{print $1}')）"
+          echo "========================================"
           uname -a  # 输出内核版本
           lsb_release -a  # 输出系统版本
           echo "网络测试："
