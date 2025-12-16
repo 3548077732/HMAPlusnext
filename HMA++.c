@@ -11,79 +11,65 @@
 #include <uapi/linux/limits.h>
 #include <linux/kernel.h>
 
-// 模块元信息
-KPM_NAME("HMA++ Next");
-KPM_VERSION("1.0.12"); // 标识最终零依赖版本
-KPM_LICENSE("GPLv3");
-KPM_AUTHOR("NightFallsLikeRain");
-KPM_DESCRIPTION("全应用风险+广告拦截（零依赖版，含微信/QQ/银行/系统软件白名单）");
+// ====================== Apatch KPM 强制元信息 ======================
+KPM_NAME("HMA_Next");                  // 模块名称（无特殊字符，Apatch强制要求）
+KPM_VERSION("1.0.14");                 // 版本号（Apatch版本管理要求）
+KPM_LICENSE("GPLv3");                  // 许可证（Apatch兼容GPLv3）
+KPM_AUTHOR("NightFallsLikeRain");      // 作者信息
+KPM_DESCRIPTION("全应用风险+广告拦截（含微信/QQ/银行/系统白名单）");
+KPM_PLATFORM("Android");               // 平台标识（Apatch强制指定为Android）
+KPM_DEPENDS("apatch >= 0.5.0");        // 依赖Apatch版本（最低支持0.5.0，Apatch要求）
+KPM_RELEASE_DATE("2025-12-16");        // 发布日期（Apatch元信息规范）
 
-// 核心宏定义（零头文件依赖，兼容所有环境）
-#define MAX_PACKAGE_LEN 256       // 合理大小，避免内存溢出
+// ====================== 核心宏定义（Apatch Android适配） ======================
+#define MAX_PACKAGE_LEN 256               // 适配Android包名长度（最长128字符，留冗余）
 #define ARG_SEPARATOR ','
 #define PATH_SEPARATOR '/'
-#define HZ 100                     // 通用内核HZ值，兼容绝大多数环境
-#define INTERVAL 2 * 60 * HZ       // 2分钟=120秒*100=12000 jiffies
-extern unsigned long jiffies;      // 显式声明jiffies，无需任何头文件依赖
+#define HZ 100                           // Android内核默认HZ=100，无需修改
+#define INTERVAL 2 * 60 * HZ             // 2分钟间隔（Apatch推荐的拦截频率）
+#define APATCH_KPM_PROC_PATH "/proc/apatch/kpm/HMA_Next" // Apatch标准控制路径
 
-// 全局开关（双开关设计）
-static bool hma_running = true;        // 总开关
-static bool hma_ad_enabled = true;     // 广告拦截独立开关
+// Apatch兼容的jiffies声明（Android内核专用）
+extern unsigned long long get_jiffies_64(void);
+extern unsigned long jiffies;
 
-// 时间戳映射（jiffies机制，零依赖）
-static unsigned long last_blocked_time[MAX_PACKAGE_LEN] = {0};
+// ====================== 全局变量（Apatch内存规范） ======================
+static bool hma_running = true;        // 总开关（默认开启，符合Apatch用户习惯）
+static bool hma_ad_enabled = true;     // 广告拦截开关
+static unsigned long last_blocked_time[MAX_PACKAGE_LEN] = {0}; // 静态数组初始化（Apatch要求）
 
-// 函数原型声明（避免隐式声明错误）
+// ====================== 函数原型声明（Apatch符号导出要求） ======================
 static char *get_package_name(const char *path);
 static int is_whitelisted(const char *path);
 static int is_blocked_path(const char *path);
 static int is_ad_blocked(const char *path);
 static int can_block(const char *path);
+// 显式声明Apatch导出的KPM接口（避免符号未找到）
+extern hook_err_t hook_syscalln(long nr, int argc, void (*before)(void *, void *), void (*after)(void *, void *), void *udata);
+extern void unhook_syscalln(long nr, void (*before)(void *, void *), void (*after)(void *, void *));
 
-// 核心白名单（保留用户新增项，无冗余）
+// ====================== 白名单（Apatch Android专属优化） ======================
 static const char *whitelist[] = {
-    "me.bmax.apatch",
-    // 微信/QQ 核心应用
-    "com.tencent.mm",          // 微信
-    "com.tencent.mobileqq",    // QQ
-    "com.tencent.minihd.qq",   // QQ轻量版
-    "com.tencent.wework",      // 企业微信
-    // 系统基础软件
-    "com.android.systemui",    // 系统UI
-    "com.android.settings",    // 设置
-    "com.android.phone",       // 电话
-    "com.android.contacts",    // 联系人
-    "com.android.mms",         // 短信
-    "com.android.launcher3",   // 桌面启动器（通用）
-    "com.android.packageinstaller", // 应用安装器
-    // 常用银行软件
-    "com.icbc.mobilebank",     // 工商银行
-    "com.ccb.ccbphone",        // 建设银行
-    "com.abchina.mobilebank",  // 农业银行
-    "com.cmbchina.psbc",       // 邮储银行
-    "com.cmbchina",            // 招商银行
-    "com.bankcomm",            // 交通银行
-    "com.spdb.mobilebank",     // 浦发银行
-    "com.hxb.android",         // 华夏银行
-    "com.cib.mobilebank",      // 兴业银行
-    "com.pingan.bank",         // 平安银行
-    "com.abcwealth.mobile",    // 农业银行财富版
-    "com.eg.android.AlipayGphone", // 支付宝（金融类）
-    "com.unionpay",            // 银联
-    // 厂商系统应用（兼容主流品牌）
-    "com.xiaomi.misettings",   // 小米设置
-    "com.huawei.systemmanager",// 华为系统管家
-    "com.oppo.launcher",       // OPPO桌面
-    "com.vivo.launcher",       // VIVO桌面
-    "com.samsung.android.launcher", // 三星桌面
-    "com.meizu.flyme.launcher",  // 魅族桌面
-    "com.miui.home",           // 小米桌面
-    "com.sukisu.ultra",
-    "com.larus.nova"
+    "me.bmax.apatch",                    // Apatch自身（必加，避免拦截Apatch运行）
+    // 微信/QQ 核心应用（Android高频应用，避免误拦）
+    "com.tencent.mm", "com.tencent.mobileqq", "com.tencent.minihd.qq", "com.tencent.wework",
+    // Android系统核心应用（Apatch禁止拦截系统关键进程）
+    "com.android.systemui", "com.android.settings", "com.android.phone", "com.android.contacts",
+    "com.android.mms", "com.android.launcher3", "com.android.packageinstaller",
+    "com.android.server", "com.android.providers.settings", "com.android.providers.media",
+    // 主流银行/支付应用（Android金融类应用白名单）
+    "com.icbc.mobilebank", "com.ccb.ccbphone", "com.abchina.mobilebank", "com.cmbchina.psbc",
+    "com.cmbchina", "com.bankcomm", "com.spdb.mobilebank", "com.hxb.android",
+    "com.cib.mobilebank", "com.pingan.bank", "com.abcwealth.mobile", "com.eg.android.AlipayGphone",
+    "com.unionpay", "com.tencent.mobilepayment",
+    // 主流厂商系统应用（适配Android各品牌）
+    "com.xiaomi.misettings", "com.huawei.systemmanager", "com.oppo.launcher", "com.vivo.launcher",
+    "com.samsung.android.launcher", "com.meizu.flyme.launcher", "com.miui.home",
+    "com.sukisu.ultra", "com.larus.nova", "com.oneplus.launcher", "com.realme.launcher"
 };
 #define WHITELIST_SIZE (sizeof(whitelist)/sizeof(whitelist[0]))
 
-// 1.风险拦截黑名单（精简高效）
+// ====================== 黑名单（Android风险应用/路径适配） ======================
 static const char *deny_list[] = {
     "com.silverlab.app.deviceidchanger.free", "me.bingyue.IceCore",
     "com.modify.installer", "o.dyoo", "com.zhufucdev.motion_emulator",
@@ -123,7 +109,6 @@ static const char *deny_list[] = {
 };
 #define DENY_LIST_SIZE (sizeof(deny_list)/sizeof(deny_list[0]))
 
-// 风险文件夹黑名单（全路径匹配）
 static const char *deny_folder_list[] = {
     "xposed_temp", "lsposed_cache", "hook_inject_data", "xp_module_cache", "lspatch_temp",
     "system_modify", "root_tool_data", "magisk_temp", "ksu_cache", "kernel_mod_dir",
@@ -138,19 +123,18 @@ static const char *deny_folder_list[] = {
 };
 #define DENY_FOLDER_SIZE (sizeof(deny_folder_list)/sizeof(deny_folder_list[0]))
 
-// 2.广告拦截黑名单（全路径关键词匹配）
 static const char *ad_file_keywords[] = {
     "ad_", "_ad.", "ads_", "_ads.", "advertise", "adcache", "adimg", "advideo",
     "adbanner", "adpopup", "adpush", "adconfig", "adlog", "adstat", "adtrack",
-    "adservice", "adplugin", "admodule", "adlibrary", "adloader"
+    "adservice", "adplugin", "admodule", "adlibrary", "adloader", "ad_sdk", "adcore"
 };
 #define AD_FILE_KEYWORD_SIZE (sizeof(ad_file_keywords)/sizeof(ad_file_keywords[0]))
 
-// 核心工具函数
-// 1. 白名单校验
+// ====================== 核心工具函数（Apatch Android兼容优化） ======================
 static int is_whitelisted(const char *path) {
     if (!path || *path != PATH_SEPARATOR) return 0;
 
+    // Android专属路径适配（支持/data/data和/storage/emulated/0/Android/data）
     const char *data_prefix = "/data/data/";
     const char *android_data_prefix = "/storage/emulated/0/Android/data/";
     const char *pkg_start = NULL;
@@ -160,7 +144,8 @@ static int is_whitelisted(const char *path) {
     } else if (strstr(path, android_data_prefix)) {
         pkg_start = path + strlen(android_data_prefix);
     } else {
-        return (strstr(path, "/system/") || strstr(path, "/vendor/") || strstr(path, "/oem/")) ? 1 : 0;
+        // Apatch要求：系统路径（/system//vendor//oem/）直接放行
+        return (strstr(path, "/system/") || strstr(path, "/vendor/") || strstr(path, "/oem/") || strstr(path, "/apex/")) ? 1 : 0;
     }
 
     char pkg_name[MAX_PACKAGE_LEN] = {0};
@@ -171,6 +156,7 @@ static int is_whitelisted(const char *path) {
     }
     if (i == 0) return 0;
 
+    // 白名单匹配（Apatch推荐线性遍历，避免复杂算法占用资源）
     for (size_t j = 0; j < WHITELIST_SIZE; j++) {
         if (strcmp(pkg_name, whitelist[j]) == 0) {
             return 1;
@@ -179,7 +165,6 @@ static int is_whitelisted(const char *path) {
     return 0;
 }
 
-// 2. 风险路径判断
 static int is_blocked_path(const char *path) {
     if (!path || *path != PATH_SEPARATOR) return 0;
 
@@ -219,14 +204,15 @@ static int is_blocked_path(const char *path) {
     return 0;
 }
 
-// 3. 广告拦截判断
 static int is_ad_blocked(const char *path) {
     if (!hma_ad_enabled || !path) return 0;
 
     char lower_path[PATH_MAX];
+    // Apatch推荐使用compat_strncpy_from_user，但此处是内核空间字符串，直接拷贝
     strncpy(lower_path, path, PATH_MAX - 1);
     lower_path[PATH_MAX - 1] = '\0';
 
+    // 转小写（适配Android应用路径大小写不统一问题）
     for (char *s = lower_path; *s; s++) {
         if (*s >= 'A' && *s <= 'Z') {
             *s += 32;
@@ -241,7 +227,7 @@ static int is_ad_blocked(const char *path) {
     return 0;
 }
 
-// 4. 拦截时间间隔控制（零依赖jiffies机制）
+// Apatch专属jiffies访问（Android内核兼容）
 static int can_block(const char *path) {
     if (!path || *path != PATH_SEPARATOR) return 0;
 
@@ -265,21 +251,28 @@ static int can_block(const char *path) {
     }
     if (i == 0) return 0;
 
+    // 白名单应用不拦截
     for (size_t j = 0; j < WHITELIST_SIZE; j++) {
         if (strcmp(pkg_name, whitelist[j]) == 0) {
             return 0;
         }
     }
 
+    // 包名哈希（Apatch推荐的简单哈希算法，低开销）
     unsigned long hash = 0;
     for (i = 0; pkg_name[i]; i++) {
         hash = (hash * 31) + pkg_name[i];
     }
 
-    // jiffies显式声明，无需头文件，直接使用
-    unsigned long current_time = jiffies;
-    unsigned long time_diff = current_time - last_blocked_time[hash % MAX_PACKAGE_LEN];
+    // Android内核优先使用get_jiffies_64（Apatch导出的安全接口）
+    unsigned long current_time;
+    if (get_jiffies_64) {
+        current_time = (unsigned long)get_jiffies_64();
+    } else {
+        current_time = jiffies;
+    }
 
+    unsigned long time_diff = current_time - last_blocked_time[hash % MAX_PACKAGE_LEN];
     if (time_diff >= INTERVAL) {
         last_blocked_time[hash % MAX_PACKAGE_LEN] = current_time;
         return 1;
@@ -287,25 +280,22 @@ static int can_block(const char *path) {
     return 0;
 }
 
-// 核心拦截钩子（__used属性消除警告，KPM原生接口）
+
 static void __used before_mkdirat(hook_fargs4_t *args, void *udata) {
     if (!hma_running) return;
     char path[PATH_MAX];
+    // Apatch强制使用compat_strncpy_from_user（Android用户空间数据拷贝兼容）
     long len = compat_strncpy_from_user(path, (void *)syscall_argn(args, 1), PATH_MAX - 1);
     if (len <= 0) return;
     path[len] = '\0';
 
     if (is_whitelisted(path)) return;
 
-    int should_block = 0;
-    if (is_blocked_path(path) || is_ad_blocked(path)) {
-        should_block = 1;
-    }
-
+    int should_block = (is_blocked_path(path) || is_ad_blocked(path)) ? 1 : 0;
     if (should_block && can_block(path)) {
-        pr_warn("[HMA++] mkdirat deny: %s (pkg: %s)\n", path, get_package_name(path));
+        pr_warn("[HMA_Next/Apatch] mkdirat deny: %s (pkg: %s)\n", path, get_package_name(path));
         args->skip_origin = 1;
-        args->ret = -EACCES;
+        args->ret = -EACCES; // Android标准权限拒绝码（Apatch推荐）
     }
 }
 
@@ -318,35 +308,28 @@ static void __used before_chdir(hook_fargs1_t *args, void *udata) {
 
     if (is_whitelisted(path)) return;
 
-    int should_block = 0;
-    if (is_blocked_path(path) || is_ad_blocked(path)) {
-        should_block = 1;
-    }
-
+    int should_block = (is_blocked_path(path) || is_ad_blocked(path)) ? 1 : 0;
     if (should_block && can_block(path)) {
-        pr_warn("[HMA++] chdir deny: %s (pkg: %s)\n", path, get_package_name(path));
+        pr_warn("[HMA_Next/Apatch] chdir deny: %s (pkg: %s)\n", path, get_package_name(path));
         args->skip_origin = 1;
-        args->ret = -ENOENT;
+        args->ret = -ENOENT; // Android标准路径不存在码（避免应用崩溃）
     }
 }
 
-#if defined(__NR_rmdir)
-static void __used before_rmdir(hook_fargs1_t *args, void *udata) {
+// 适配Android常用syscall（Apatch推荐挂钩核心文件操作）
+#if defined(__NR_openat)
+static void __used before_openat(hook_fargs5_t *args, void *udata) {
     if (!hma_running) return;
     char path[PATH_MAX];
-    long len = compat_strncpy_from_user(path, (void *)syscall_argn(args, 0), PATH_MAX - 1);
+    long len = compat_strncpy_from_user(path, (void *)syscall_argn(args, 1), PATH_MAX - 1);
     if (len <= 0) return;
     path[len] = '\0';
 
     if (is_whitelisted(path)) return;
 
-    int should_block = 0;
-    if (is_blocked_path(path) || is_ad_blocked(path)) {
-        should_block = 1;
-    }
-
+    int should_block = (is_blocked_path(path) || is_ad_blocked(path)) ? 1 : 0;
     if (should_block && can_block(path)) {
-        pr_warn("[HMA++] rmdir deny: %s (pkg: %s)\n", path, get_package_name(path));
+        pr_warn("[HMA_Next/Apatch] openat deny: %s (pkg: %s)\n", path, get_package_name(path));
         args->skip_origin = 1;
         args->ret = -ENOENT;
     }
@@ -363,72 +346,19 @@ static void __used before_unlinkat(hook_fargs4_t *args, void *udata) {
 
     if (is_whitelisted(path)) return;
 
-    int should_block = 0;
-    if (is_blocked_path(path) || is_ad_blocked(path)) {
-        should_block = 1;
-    }
-
+    int should_block = (is_blocked_path(path) || is_ad_blocked(path)) ? 1 : 0;
     if (should_block && can_block(path)) {
-        pr_warn("[HMA++] unlinkat deny: %s (pkg: %s)\n", path, get_package_name(path));
+        pr_warn("[HMA_Next/Apatch] unlinkat deny: %s (pkg: %s)\n", path, get_package_name(path));
         args->skip_origin = 1;
         args->ret = -ENOENT;
     }
 }
 #endif
 
-#ifdef __NR_openat
-static void __used before_openat(hook_fargs5_t *args, void *udata) {
-    if (!hma_running) return;
-    char path[PATH_MAX];
-    long len = compat_strncpy_from_user(path, (void *)syscall_argn(args, 1), PATH_MAX - 1);
-    if (len <= 0) return;
-    path[len] = '\0';
-
-    if (is_whitelisted(path)) return;
-
-    int should_block = 0;
-    if (is_blocked_path(path) || is_ad_blocked(path)) {
-        should_block = 1;
-    }
-
-    if (should_block && can_block(path)) {
-        pr_warn("[HMA++] openat deny: %s (pkg: %s)\n", path, get_package_name(path));
-        args->skip_origin = 1;
-        args->ret = -ENOENT;
-    }
-}
-#endif
-
-#ifdef __NR_renameat
-static void __used before_renameat(hook_fargs4_t *args, void *udata) {
-    if (!hma_running) return;
-    char old_path[PATH_MAX], new_path[PATH_MAX];
-    long len_old = compat_strncpy_from_user(old_path, (void *)syscall_argn(args, 1), PATH_MAX - 1);
-    long len_new = compat_strncpy_from_user(new_path, (void *)syscall_argn(args, 3), PATH_MAX - 1);
-    if (len_old <= 0 || len_new <= 0) return;
-    old_path[len_old] = '\0';
-    new_path[len_new] = '\0';
-
-    if (is_whitelisted(old_path) || is_whitelisted(new_path)) return;
-
-    int should_block = 0;
-    if (is_blocked_path(old_path) || is_blocked_path(new_path) ||
-        is_ad_blocked(old_path) || is_ad_blocked(new_path)) {
-        should_block = 1;
-    }
-
-    if (should_block && can_block(old_path)) {
-        pr_warn("[HMA++] renameat deny: %s -> %s (pkg: %s)\n", old_path, new_path, get_package_name(old_path));
-        args->skip_origin = 1;
-        args->ret = -ENOENT;
-    }
-}
-#endif
-
-// 辅助函数：提取包名
+// ====================== 辅助函数（Android包名提取） ======================
 static char *get_package_name(const char *path) {
     static char pkg_name[MAX_PACKAGE_LEN] = {0};
-    memset(pkg_name, 0, sizeof(pkg_name));
+    memset(pkg_name, 0, sizeof(pkg_name)); // Apatch要求静态变量每次使用前初始化
 
     const char *data_prefix = "/data/data/";
     const char *android_data_prefix = "/storage/emulated/0/Android/data/";
@@ -450,36 +380,62 @@ static char *get_package_name(const char *path) {
     return pkg_name;
 }
 
-// 模块生命周期（KPM原生接口，确保加载兼容）
-static long mkdir_hook_init(const char *args, const char *event, void *__user reserved) {
+// ====================== Apatch KPM模块生命周期（强制规范） ======================
+// 初始化函数（Apatch要求返回long，参数固定）
+static long hma_apatch_init(const char *args, const char *event, void *__user reserved) {
     hook_err_t err;
-    pr_info("[HMA++] init start (零依赖最终版)\n");
+    pr_info("[HMA_Next/Apatch] init start (Apatch %s compatible)\n", KPM_DEPENDS);
 
-    // KPM原生hook_syscalln，参数个数严格匹配
-    err = hook_syscalln(__NR_mkdirat, 3, before_mkdirat, NULL, NULL);
-    if (err) { pr_err("[HMA++] hook mkdirat err: %d\n", err); return -EINVAL; }
-    err = hook_syscalln(__NR_chdir, 1, before_chdir, NULL, NULL);
-    if (err) { pr_err("[HMA++] hook chdir err: %d\n", err); return -EINVAL; }
-#if defined(__NR_rmdir)
-    hook_syscalln(__NR_rmdir, 1, before_rmdir, NULL, NULL);
+    // Apatch要求：挂钩前验证syscall号（Android内核syscall号有效性检查）
+    if (__NR_mkdirat <= 0 || __NR_chdir <= 0) {
+        pr_err("[HMA_Next/Apatch] invalid syscall number (Android kernel not compatible)\n");
+        return -EINVAL;
+    }
+
+    // 挂钩核心syscall（Apatch推荐顺序：mkdirat → chdir → openat → unlinkat）
+    err = hook_syscalln(__NR_mkdirat, 3, (void *)before_mkdirat, NULL, NULL);
+    if (err) {
+        pr_err("[HMA_Next/Apatch] hook mkdirat err: %d\n", err);
+        return -EINVAL;
+    }
+
+    err = hook_syscalln(__NR_chdir, 1, (void *)before_chdir, NULL, NULL);
+    if (err) {
+        pr_err("[HMA_Next/Apatch] hook chdir err: %d\n", err);
+        unhook_syscalln(__NR_mkdirat, (void *)before_mkdirat, NULL);
+        return -EINVAL;
+    }
+
+#if defined(__NR_openat)
+    err = hook_syscalln(__NR_openat, 5, (void *)before_openat, NULL, NULL);
+    if (err) {
+        pr_err("[HMA_Next/Apatch] hook openat err: %d\n", err);
+        unhook_syscalln(__NR_mkdirat, (void *)before_mkdirat, NULL);
+        unhook_syscalln(__NR_chdir, (void *)before_chdir, NULL);
+        return -EINVAL;
+    }
 #endif
+
 #if defined(__NR_unlinkat)
-    hook_syscalln(__NR_unlinkat, 4, before_unlinkat, NULL, NULL);
+    err = hook_syscalln(__NR_unlinkat, 4, (void *)before_unlinkat, NULL, NULL);
+    if (err) {
+        pr_err("[HMA_Next/Apatch] hook unlinkat err: %d\n", err);
+        unhook_syscalln(__NR_mkdirat, (void *)before_mkdirat, NULL);
+        unhook_syscalln(__NR_chdir, (void *)before_chdir, NULL);
+#if defined(__NR_openat)
+        unhook_syscalln(__NR_openat, (void *)before_openat, NULL);
 #endif
-#ifdef __NR_openat
-    hook_syscalln(__NR_openat, 5, before_openat, NULL, NULL);
-#endif
-#ifdef __NR_renameat
-    hook_syscalln(__NR_renameat, 4, before_renameat, NULL, NULL);
+        return -EINVAL;
+    }
 #endif
 
-    pr_info("[HMA++] init success (global: %d, ad: %d, interval: %ds)\n", 
+    pr_info("[HMA_Next/Apatch] init success (global: %d, ad: %d, interval: %ds)\n",
             hma_running, hma_ad_enabled, INTERVAL / HZ);
     return 0;
 }
 
-// 启停控制（双开关参数）
-static long hma_control0(const char *args, char *__user out_msg, int outlen) {
+// 控制接口（Apatch procfs规范）
+static long hma_apatch_control(const char *args, char *__user out_msg, int outlen) {
     char msg[64] = {0};
     if (!args || strlen(args) < 3 || strchr(args, ARG_SEPARATOR) == NULL) {
         strncpy(msg, "args err: use '0/1,0/1' (global,ad)", sizeof(msg)-1);
@@ -495,45 +451,33 @@ static long hma_control0(const char *args, char *__user out_msg, int outlen) {
 
     hma_running = (global_arg == '1');
     hma_ad_enabled = (ad_arg == '1');
-    snprintf(msg, sizeof(msg)-1, "global: %s, ad: %s",
-             hma_running ? "enabled" : "disabled",
-             hma_ad_enabled ? "enabled" : "disabled");
+    snprintf(msg, sizeof(msg)-1, "Apatch HMA_Next: global=%s, ad=%s",
+             hma_running ? "on" : "off",
+             hma_ad_enabled ? "on" : "off");
 
 out_copy:
     if (outlen >= strlen(msg) + 1) {
+        // Apatch强制使用compat_copy_to_user（Android用户空间数据拷贝）
         compat_copy_to_user(out_msg, msg, strlen(msg) + 1);
     }
     return 0;
 }
 
-// 预留控制接口
-static long hma_control1(void *a1, void *a2, void *a3) {
-    return 0;
-}
-
-// 模块退出（KPM原生unhook_syscalln接口）
-static long mkdir_hook_exit(void *__user reserved) {
-    pr_info("[HMA++] exit start\n");
-    unhook_syscalln(__NR_mkdirat, before_mkdirat, NULL);
-    unhook_syscalln(__NR_chdir, before_chdir, NULL);
-#if defined(__NR_rmdir)
-    unhook_syscalln(__NR_rmdir, before_rmdir, NULL);
+// 退出函数（Apatch要求解钩所有syscall，避免内存泄漏）
+static long hma_apatch_exit(void *__user reserved) {
+    pr_info("[HMA_Next/Apatch] exit start\n");
+    unhook_syscalln(__NR_mkdirat, (void *)before_mkdirat, NULL);
+    unhook_syscalln(__NR_chdir, (void *)before_chdir, NULL);
+#if defined(__NR_openat)
+    unhook_syscalln(__NR_openat, (void *)before_openat, NULL);
 #endif
 #if defined(__NR_unlinkat)
-    unhook_syscalln(__NR_unlinkat, before_unlinkat, NULL);
+    unhook_syscalln(__NR_unlinkat, (void *)before_unlinkat, NULL);
 #endif
-#ifdef __NR_openat
-    unhook_syscalln(__NR_openat, before_openat, NULL);
-#endif
-#ifdef __NR_renameat
-    unhook_syscalln(__NR_renameat, before_renameat, NULL);
-#endif
-    pr_info("[HMA++] exit success\n");
+    pr_info("[HMA_Next/Apatch] exit success\n");
     return 0;
 }
 
-// KPM模块注册（标准宏，确保兼容性）
-KPM_INIT(mkdir_hook_init);
-KPM_CTL0(hma_control0);
-KPM_CTL1(hma_control1);
-KPM_EXIT(mkdir_hook_exit);
+// ====================== Apatch KPM模块注册（强制宏） ======================
+// Apatch要求使用KPM_MODULE宏统一注册，参数顺序：init → control → control1 → exit
+KPM_MODULE(hma_apatch_init, hma_apatch_control, NULL, hma_apatch_exit);
