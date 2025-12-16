@@ -1,0 +1,117 @@
+# .github/workflows/build-hma-kpm.yml
+name: 手动构建 HMA++ Next KPM 模块
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_version:
+        description: "指定内核版本（如 5.15.0-78-generic，留空用默认）"
+        required: false
+        default: ""
+      build_mode:
+        description: "构建模式"
+        type: choice
+        required: true
+        default: "release"
+        options:
+          - release
+          - debug
+
+jobs:
+  build-kpm:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: 🔍 检出代码（包含源码 HMA++.c）
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: 🛠️ 安装编译依赖
+        run: |
+          sudo apt update -y
+          sudo apt install -y gcc make linux-headers-$(uname -r) libelf-dev bc flex bison dwarves
+          # 安装 KPM 工具链
+          git clone https://github.com/chenxyu/kpm.git /tmp/kpm
+          cd /tmp/kpm
+          make -j$(nproc)
+          sudo make install
+          if ! command -v kpm &> /dev/null; then
+            echo "❌ 错误：KPM 工具安装失败！"
+            exit 1
+          fi
+          # 安装指定内核头文件（若用户输入）
+          if [ -n "${{ github.event.inputs.kernel_version }}" ]; then
+            sudo apt install -y linux-headers-${{ github.event.inputs.kernel_version }} || {
+              echo "❌ 错误：指定内核版本的头文件安装失败！"
+              exit 1
+            }
+          fi
+
+      - name: ⚙️ 配置构建参数（根据模式调整）
+        run: |
+          if [ "${{ github.event.inputs.build_mode }}" = "debug" ]; then
+            echo "EXTRA_CFLAGS=-g" >> $GITHUB_ENV
+            echo "📌 已启用 debug 模式，保留调试信息"
+          fi
+
+      - name: 🚀 编译源码（HMA++.c → .ko 模块）
+        run: |
+          # 确认源码文件存在
+          if [ ! -f "HMA++.c" ]; then
+            echo "❌ 错误：未找到源码文件 HMA++.c！"
+            exit 1
+          fi
+          # 清理旧产物
+          make clean
+          # 编译（传入构建参数）
+          make -j$(nproc) EXTRA_CFLAGS="${{ env.EXTRA_CFLAGS }}"
+          # 校验编译产物
+          if [ ! -f "HMA++.o" ]; then
+            echo "❌ 错误：HMA++.c 编译失败，未生成 HMA++.o！"
+            exit 1
+          fi
+          if [ ! -f "HMA_Next.ko" ]; then
+            echo "❌ 错误：内核模块链接失败，未生成 HMA_Next.ko！"
+            exit 1
+          fi
+          # 输出模块信息（验证合法性）
+          echo "📌 内核模块信息："
+          modinfo HMA_Next.ko | grep -E "filename|version|author|license"
+
+      - name: 📦 打包为 KPM 模块（HMA++.kpm）
+        run: |
+          make package  # 调用 Makefile 的 package 目标，确保产物名一致
+          # 再次校验 KPM 产物
+          if [ ! -f "HMA++.kpm" ]; then
+            echo "❌ 错误：KPM 打包失败，未找到 HMA++.kpm！"
+            exit 1
+          fi
+          # 输出 KPM 模块信息
+          echo "📌 KPM 模块信息："
+          kpm info HMA++.kpm
+          ls -l HMA++.kpm  # 显示文件大小和权限，便于调试
+
+      - name: 📤 上传产物（包含 KPM 和中间文件）
+        uses: actions/upload-artifact@v4
+        with:
+          name: HMA++-Next-KPM-${{ github.event.inputs.build_mode }}
+          path: |
+            HMA++.c  # 源码文件（可选，便于回溯）
+            HMA++.o  # 编译中间产物
+            HMA_Next.ko  # 内核模块
+            HMA++.kpm  # 最终 KPM 产物
+            Makefile  # 构建配置
+          retention-days: 90
+          if-no-files-found: error  # 无产物时直接标记失败
+
+      - name: 📝 构建报告（清晰展示结果）
+        run: |
+          echo "========================================"
+          echo "✅ HMA++ Next KPM 模块构建完成！"
+          echo "📌 源码文件：HMA++.c"
+          echo "📌 构建模式：${{ github.event.inputs.build_mode }}"
+          echo "📌 内核版本：${{ github.event.inputs.kernel_version || '默认（'$(uname -r)')' }}"
+          echo "📌 最终产物：HMA++.kpm（大小：$(du -sh HMA++.kpm | awk '{print $1}')）"
+          echo "========================================"
