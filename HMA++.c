@@ -24,7 +24,7 @@ KPM_DESCRIPTION("核心风险拦截测试+广告拦截测试");
 #endif
 #define TARGET_PATH "/storage/emulated/0/Android/data/"
 #define TARGET_PATH_LEN (sizeof(TARGET_PATH)-1)
-#define MAX_PACKAGE_LEN 2064
+#define MAX_PACKAGE_LEN 256
 
 // 新增：常见合规应用白名单（社交+支付+办公+影音+出行+系统，精准放行）
 // 1.社交核心类
@@ -231,7 +231,7 @@ static const char *risk_suffix_list[] = {
 };
 #define RISK_SUFFIX_SIZE (sizeof(risk_suffix_list)/sizeof(risk_suffix_list[0]))
 
-// 补全：广告拦截黑名单（精准关键词，无微信误命中）【核心修复：移至is_ad_blocked函数前声明】
+// 广告拦截黑名单（精准关键词，无微信误命中）【前置声明，避免未定义】
 static const char *ad_file_keywords[] = {
     "advertise_", "_advertise.", "ads_full", "_ads_full.", "advertise_cache", 
     "adbanner_", "adpopup_", "adpush_", "adconfig_", "adlog_", "adstat_"
@@ -348,7 +348,7 @@ static int is_ad_blocked(const char *path) {
 static void before_mkdirat(hook_fargs4_t *args, void *udata) {
     if (!hma_running) return;
     char path[PATH_MAX] = {0};
-    // 适配KPM框架：使用封装函数kf_strncpy_from_user
+    // 适配KPM框架+安全校验：kf_strncpy_from_user返回负数为错误
     long len = kf_strncpy_from_user(path, (void *)syscall_argn(args, 1), PATH_MAX - 1);
     if (len <= 0) return;
     path[len] = '\0';
@@ -362,7 +362,6 @@ static void before_mkdirat(hook_fargs4_t *args, void *udata) {
 static void before_chdir(hook_fargs1_t *args, void *udata) {
     if (!hma_running) return;
     char path[PATH_MAX] = {0};
-    // 适配KPM框架：使用封装函数kf_strncpy_from_user
     long len = kf_strncpy_from_user(path, (void *)syscall_argn(args, 0), PATH_MAX - 1);
     if (len <= 0) return;
     path[len] = '\0';
@@ -377,7 +376,6 @@ static void before_chdir(hook_fargs1_t *args, void *udata) {
 static void before_rmdir(hook_fargs1_t *args, void *udata) {
     if (!hma_running) return;
     char path[PATH_MAX] = {0};
-    // 适配KPM框架：使用封装函数kf_strncpy_from_user
     long len = kf_strncpy_from_user(path, (void *)syscall_argn(args, 0), PATH_MAX - 1);
     if (len <= 0) return;
     path[len] = '\0';
@@ -390,10 +388,11 @@ static void before_rmdir(hook_fargs1_t *args, void *udata) {
 #endif
 
 #if defined(__NR_unlinkat)
-static void before_unlinkat(hook_fargs4_t *args, void *udata) {
+// 修复1：unlinkat参数个数为3，钩子结构体改为hook_fargs3_t
+static void before_unlinkat(hook_fargs3_t *args, void *udata) {
     if (!hma_running) return;
     char path[PATH_MAX] = {0};
-    // 适配KPM框架：使用封装函数kf_strncpy_from_user
+    // unlinkat第二个参数为pathname（索引1），参数个数匹配
     long len = kf_strncpy_from_user(path, (void *)syscall_argn(args, 1), PATH_MAX - 1);
     if (len <= 0) return;
     path[len] = '\0';
@@ -406,10 +405,11 @@ static void before_unlinkat(hook_fargs4_t *args, void *udata) {
 #endif
 
 #ifdef __NR_openat
-static void before_openat(hook_fargs5_t *args, void *udata) {
+// 修复2：openat参数个数为4，钩子结构体改为hook_fargs4_t
+static void before_openat(hook_fargs4_t *args, void *udata) {
     if (!hma_running) return;
     char path[PATH_MAX] = {0};
-    // 适配KPM框架：使用封装函数kf_strncpy_from_user
+    // openat第二个参数为pathname（索引1），参数个数匹配
     long len = kf_strncpy_from_user(path, (void *)syscall_argn(args, 1), PATH_MAX - 1);
     if (len <= 0) return;
     path[len] = '\0';
@@ -426,7 +426,6 @@ static void before_openat(hook_fargs5_t *args, void *udata) {
 static void before_renameat(hook_fargs4_t *args, void *udata) {
     if (!hma_running) return;
     char old_path[PATH_MAX] = {0}, new_path[PATH_MAX] = {0};
-    // 适配KPM框架：使用封装函数kf_strncpy_from_user
     long len_old = kf_strncpy_from_user(old_path, (void *)syscall_argn(args, 1), PATH_MAX - 1);
     long len_new = kf_strncpy_from_user(new_path, (void *)syscall_argn(args, 3), PATH_MAX - 1);
     if (len_old <= 0 || len_new <= 0) return;
@@ -446,7 +445,7 @@ static long mkdir_hook_init(const char *args, const char *event, void *__user re
     hook_err_t err;
     pr_info("[HMA++] init start (v1.1.0, full whitelist+precise block)\n");
 
-    // 挂钩核心文件操作syscall，容错处理
+    // 挂钩核心文件操作syscall，容错处理（参数个数精准匹配）
     err = hook_syscalln(__NR_mkdirat, 3, before_mkdirat, NULL, NULL);
     if (err) { pr_err("[HMA++] hook mkdirat err: %d\n", err); return -EINVAL; }
     err = hook_syscalln(__NR_chdir, 1, before_chdir, NULL, NULL);
@@ -455,10 +454,12 @@ static long mkdir_hook_init(const char *args, const char *event, void *__user re
     hook_syscalln(__NR_rmdir, 1, before_rmdir, NULL, NULL);
 #endif
 #if defined(__NR_unlinkat)
-    hook_syscalln(__NR_unlinkat, 4, before_unlinkat, NULL, NULL);
+    // 修复3：unlinkat挂钩参数个数改为3，与syscall原型匹配
+    hook_syscalln(__NR_unlinkat, 3, before_unlinkat, NULL, NULL);
 #endif
 #ifdef __NR_openat
-    hook_syscalln(__NR_openat, 5, before_openat, NULL, NULL);
+    // 修复4：openat挂钩参数个数改为4，与syscall原型匹配
+    hook_syscalln(__NR_openat, 4, before_openat, NULL, NULL);
 #endif
 #ifdef __NR_renameat
     hook_syscalln(__NR_renameat, 4, before_renameat, NULL, NULL);
