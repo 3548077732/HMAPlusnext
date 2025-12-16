@@ -3,7 +3,7 @@
 #define __user
 #endif
 
-// 仅保留KPM框架必需头文件（新增linux/ctype.h，解决tolower声明问题）
+// 仅保留KPM框架必需头文件（移除linux/ctype.h，彻底极简依赖）
 #include <kpmodule.h>
 #include <syscall.h>
 #include <linux/printk.h>
@@ -11,7 +11,6 @@
 #include <linux/errno.h>
 #include <uapi/linux/limits.h>
 #include <linux/kernel.h>
-#include <linux/ctype.h>  // 关键：内核空间tolower函数声明
 
 // 显式声明KPM/内核符号（弱引用，避免符号缺失直接崩溃）
 extern long kf_strncpy_from_user(char *dest, const void __user *src, long count) __attribute__((weak));
@@ -28,13 +27,6 @@ extern void unhook_syscalln(int nr, void *before, void *after) __attribute__((we
 #define pr_err(fmt, ...) printk(KERN_ERR "[HMA++] " fmt "\n", ##__VA_ARGS__)
 #endif
 
-// 模块元信息（KPM标准格式，确保识别）
-KPM_NAME("HMA++ Next");
-KPM_VERSION("1.0.12");
-KPM_LICENSE("GPLv3");
-KPM_AUTHOR("NightFallsLikeRain");
-KPM_DESCRIPTION("全应用风险+广告拦截（含微信/QQ/银行/系统软件白名单）");
-
 // 核心宏定义
 #define MAX_PACKAGE_LEN 256
 #define ARG_SEPARATOR ','
@@ -47,46 +39,29 @@ static bool hma_running = true;
 static bool hma_ad_enabled = true;
 static unsigned long last_blocked_time[MAX_PACKAGE_LEN] = {0};
 
-// 白名单（修复：补充缺失的逗号）
+// 自定义小写转换函数（替代tolower，不依赖任何头文件）
+static inline char to_lower_char(char c) {
+    return (c >= 'A' && c <= 'Z') ? (c + 32) : c;
+}
+
+// 模块元信息（KPM标准格式，确保识别）
+KPM_NAME("HMA++ Next");
+KPM_VERSION("1.0.12");
+KPM_LICENSE("GPLv3");
+KPM_AUTHOR("NightFallsLikeRain");
+KPM_DESCRIPTION("全应用风险+广告拦截（含微信/QQ/银行/系统软件白名单）");
+
+// 白名单（已修复逗号缺失）
 static const char *whitelist[] = {
-    // 微信/QQ 核心应用
-    "com.tencent.mm",          // 微信
-    "com.tencent.mobileqq",    // QQ
-    "com.tencent.minihd.qq",   // QQ轻量版
-    "com.tencent.wework",      // 企业微信
-    // 系统基础软件
-    "com.android.systemui",    // 系统UI
-    "com.android.settings",    // 设置
-    "com.android.phone",       // 电话
-    "com.android.contacts",    // 联系人
-    "com.android.mms",         // 短信
-    "com.android.launcher3",   // 桌面启动器（通用）
-    "com.android.packageinstaller", // 应用安装器
-    // 常用银行软件
-    "com.icbc.mobilebank",     // 工商银行
-    "com.ccb.ccbphone",        // 建设银行
-    "com.abchina.mobilebank",  // 农业银行
-    "com.cmbchina.psbc",       // 邮储银行
-    "com.cmbchina",            // 招商银行
-    "com.bankcomm",            // 交通银行
-    "com.spdb.mobilebank",     // 浦发银行
-    "com.hxb.android",         // 华夏银行
-    "com.cib.mobilebank",      // 兴业银行
-    "com.pingan.bank",         // 平安银行
-    "com.abcwealth.mobile",    // 农业银行财富版
-    "com.eg.android.AlipayGphone", // 支付宝（金融类）
-    "com.unionpay",            // 银联
-    // 厂商系统应用（兼容主流品牌）
-    "com.xiaomi.misettings",   // 小米设置
-    "com.huawei.systemmanager",// 华为系统管家
-    "com.oppo.launcher",       // OPPO桌面
-    "com.vivo.launcher",       // VIVO桌面
-    "com.samsung.android.launcher", // 三星桌面
-    "com.meizu.flyme.launcher",// 魅族桌面（修复：补充逗号）
-    "me.bmax.apatch",          // 修复：补充逗号
-    "com.larus.nova",          // 修复：补充逗号
-    "com.miui.home",           // 修复：补充逗号
-    "com.sukisu.ultra"
+    "com.tencent.mm", "com.tencent.mobileqq", "com.tencent.minihd.qq", "com.tencent.wework",
+    "com.android.systemui", "com.android.settings", "com.android.phone", "com.android.contacts",
+    "com.android.mms", "com.android.launcher3", "com.android.packageinstaller",
+    "com.icbc.mobilebank", "com.ccb.ccbphone", "com.abchina.mobilebank", "com.cmbchina.psbc",
+    "com.cmbchina", "com.bankcomm", "com.spdb.mobilebank", "com.hxb.android",
+    "com.cib.mobilebank", "com.pingan.bank", "com.abcwealth.mobile", "com.eg.android.AlipayGphone",
+    "com.unionpay", "com.xiaomi.misettings", "com.huawei.systemmanager", "com.oppo.launcher",
+    "com.vivo.launcher", "com.samsung.android.launcher", "com.meizu.flyme.launcher",
+    "me.bmax.apatch", "com.larus.nova", "com.miui.home", "com.sukisu.ultra"
 };
 #define WHITELIST_SIZE (sizeof(whitelist)/sizeof(whitelist[0]))
 
@@ -130,7 +105,7 @@ static const char *deny_list[] = {
 };
 #define DENY_LIST_SIZE (sizeof(deny_list)/sizeof(deny_list[0]))
 
-// 风险文件夹黑名单（全路径匹配）（修复：注释符号改为//）
+// 风险文件夹黑名单（全路径匹配）
 static const char *deny_folder_list[] = {
     "xposed_temp", "lsposed_cache", "hook_inject_data", "xp_module_cache", "lspatch_temp",
     "system_modify", "root_tool_data", "magisk_temp", "ksu_cache", "kernel_mod_dir",
@@ -165,7 +140,7 @@ static long hma_control0(const char *ctl_args, char *__user out_msg, int outlen)
 static long hma_control1(void *a1, void *a2, void *a3);
 static long mkdir_hook_exit(void *reserved);
 
-// 辅助函数（修复：is_blocked_path添加deny_folder_list匹配）
+// 辅助函数（核心：用自定义to_lower_char替代tolower）
 static int is_whitelisted(const char *path) {
     if (!path) return 0;
     for (size_t i = 0; i < WHITELIST_SIZE; i++) {
@@ -179,7 +154,7 @@ static int is_blocked_path(const char *path) {
     for (size_t i = 0; i < DENY_LIST_SIZE; i++) {
         if (strstr(path, deny_list[i])) return 1;
     }
-    // 匹配风险文件夹（新增：之前遗漏的文件夹黑名单匹配）
+    // 匹配风险文件夹
     for (size_t i = 0; i < DENY_FOLDER_SIZE; i++) {
         if (strstr(path, deny_folder_list[i])) return 1;
     }
@@ -189,8 +164,12 @@ static int is_ad_blocked(const char *path) {
     if (!hma_ad_enabled || !path) return 0;
     char lower[PATH_MAX];
     strncpy(lower, path, PATH_MAX-1);
-    lower[PATH_MAX-1] = '\0'; // 修复：添加字符串结束符，避免越界
-    for (char *s = lower; *s; s++) *s = tolower(*s);
+    lower[PATH_MAX-1] = '\0'; // 避免字符串越界
+    // 用自定义函数转换小写，不依赖linux/ctype.h
+    for (char *s = lower; *s; s++) {
+        *s = to_lower_char(*s);
+    }
+    // 匹配广告关键词
     for (size_t i = 0; i < AD_FILE_KEYWORD_SIZE; i++) {
         if (strstr(lower, ad_file_keywords[i])) return 1;
     }
@@ -201,18 +180,17 @@ static int can_block(const char *path) {
     const char *pkg_start = strstr(path, "/data/data/") ? path+10 : strstr(path, "/Android/data/") ? path+13 : NULL;
     if (!pkg_start) return 0;
     char pkg[MAX_PACKAGE_LEN] = {0};
-    // 修复：处理path中无 '/' 的情况，避免strchr返回NULL
     char *pkg_end = strchr(pkg_start, '/');
     if (pkg_end) {
         strncpy(pkg, pkg_start, pkg_end - pkg_start);
     } else {
         strncpy(pkg, pkg_start, MAX_PACKAGE_LEN-1);
     }
-    // 白名单应用直接放行
+    // 白名单应用放行
     for (size_t i = 0; i < WHITELIST_SIZE; i++) {
         if (!strcmp(pkg, whitelist[i])) return 0;
     }
-    // 包名哈希去重，2分钟内仅拦截一次
+    // 2分钟内仅拦截一次
     unsigned long hash = 0;
     for (size_t i = 0; pkg[i]; i++) hash = hash*31 + pkg[i];
     unsigned long idx = hash % MAX_PACKAGE_LEN;
@@ -253,7 +231,7 @@ static void __used before_chdir(hook_fargs1_t *args, void *udata) {
 static long __used mkdir_hook_init(const char *args, const char *event, void *reserved) {
     pr_emerg("===== 开始初始化（KPM加载修复版） =====");
     
-    // 关键：检测KPM核心符号是否存在（避免加载失败无日志）
+    // 关键：检测KPM核心符号是否存在
     if (!hook_syscalln) {
         pr_emerg("ERROR: KPM框架未导出hook_syscalln符号！");
         return -EINVAL;
@@ -267,7 +245,7 @@ static long __used mkdir_hook_init(const char *args, const char *event, void *re
         return -EINVAL;
     }
 
-    // 挂钩系统调用（简化逻辑，确保成功）
+    // 挂钩系统调用
     hook_err_t err = hook_syscalln((int)__NR_mkdirat, 3, before_mkdirat, NULL, NULL);
     if (err) {
         pr_emerg("ERROR: 挂钩mkdirat失败！err=%d", err);
