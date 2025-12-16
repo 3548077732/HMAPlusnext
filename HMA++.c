@@ -117,8 +117,7 @@ static const char *deny_folder_list[] = {
     "emulator_data", "virtual_env", "fake_device", "emulator_cache", "virtual_device",
     "ad_plugin", "malicious_plugin", "ad_cache", "plugin_hack", "ad_inject",
     "data_modify", "crack_data", "modify_logs", "crack_cache", "data_hack",
-    "tool_residue", "illegal_backup", "hack_residue", "backup_crack", "tool_cache",
-    "MiShopSkyTreeBundleProvider", "release"
+    "tool_residue", "illegal_backup", "hack_residue", "backup_crack", "tool_cache"
 };
 #define DENY_FOLDER_SIZE (sizeof(deny_folder_list)/sizeof(deny_folder_list[0]))
 
