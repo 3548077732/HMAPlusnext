@@ -3,7 +3,7 @@
 #define __user
 #endif
 
-// 仅保留KPM框架必需头文件（极简依赖）
+// 仅保留KPM框架必需头文件（新增linux/ctype.h，解决tolower声明问题）
 #include <kpmodule.h>
 #include <syscall.h>
 #include <linux/printk.h>
@@ -11,6 +11,7 @@
 #include <linux/errno.h>
 #include <uapi/linux/limits.h>
 #include <linux/kernel.h>
+#include <linux/ctype.h>  // 关键：内核空间tolower函数声明
 
 // 显式声明KPM/内核符号（弱引用，避免符号缺失直接崩溃）
 extern long kf_strncpy_from_user(char *dest, const void __user *src, long count) __attribute__((weak));
@@ -46,8 +47,7 @@ static bool hma_running = true;
 static bool hma_ad_enabled = true;
 static unsigned long last_blocked_time[MAX_PACKAGE_LEN] = {0};
 
-// 白名单（不变）
-// 核心白名单（QQ/微信/系统软件/常用银行，无冗余）
+// 白名单（修复：补充缺失的逗号）
 static const char *whitelist[] = {
     // 微信/QQ 核心应用
     "com.tencent.mm",          // 微信
@@ -82,10 +82,10 @@ static const char *whitelist[] = {
     "com.oppo.launcher",       // OPPO桌面
     "com.vivo.launcher",       // VIVO桌面
     "com.samsung.android.launcher", // 三星桌面
-    "com.meizu.flyme.launcher" // 魅族桌面
-    "me.bmax.apatch"
-    "com.larus.nova",
-    "com.miui.home",
+    "com.meizu.flyme.launcher",// 魅族桌面（修复：补充逗号）
+    "me.bmax.apatch",          // 修复：补充逗号
+    "com.larus.nova",          // 修复：补充逗号
+    "com.miui.home",           // 修复：补充逗号
     "com.sukisu.ultra"
 };
 #define WHITELIST_SIZE (sizeof(whitelist)/sizeof(whitelist[0]))
@@ -129,7 +129,8 @@ static const char *deny_list[] = {
     "com.tencent.tmgp.dfm"
 };
 #define DENY_LIST_SIZE (sizeof(deny_list)/sizeof(deny_list[0]))
-/ 风险文件夹黑名单（全路径匹配）
+
+// 风险文件夹黑名单（全路径匹配）（修复：注释符号改为//）
 static const char *deny_folder_list[] = {
     "xposed_temp", "lsposed_cache", "hook_inject_data", "xp_module_cache", "lspatch_temp",
     "system_modify", "root_tool_data", "magisk_temp", "ksu_cache", "kernel_mod_dir",
@@ -144,7 +145,7 @@ static const char *deny_folder_list[] = {
 };
 #define DENY_FOLDER_SIZE (sizeof(deny_folder_list)/sizeof(deny_folder_list[0]))
 
-// 2.广告拦截黑名单（全路径关键词匹配）
+// 广告拦截黑名单（全路径关键词匹配）
 static const char *ad_file_keywords[] = {
     "ad_", "_ad.", "ads_", "_ads.", "advertise", "adcache", "adimg", "advideo",
     "adbanner", "adpopup", "adpush", "adconfig", "adlog", "adstat", "adtrack",
@@ -164,18 +165,23 @@ static long hma_control0(const char *ctl_args, char *__user out_msg, int outlen)
 static long hma_control1(void *a1, void *a2, void *a3);
 static long mkdir_hook_exit(void *reserved);
 
-// 辅助函数（不变，仅保留核心逻辑）
+// 辅助函数（修复：is_blocked_path添加deny_folder_list匹配）
 static int is_whitelisted(const char *path) {
     if (!path) return 0;
     for (size_t i = 0; i < WHITELIST_SIZE; i++) {
         if (strstr(path, whitelist[i])) return 1;
     }
-    return (strstr(path, "/system/") || strstr(path, "/vendor/")) ? 1 : 0;
+    return (strstr(path, "/system/") || strstr(path, "/vendor/") || strstr(path, "/oem/")) ? 1 : 0;
 }
 static int is_blocked_path(const char *path) {
     if (!path) return 0;
+    // 匹配风险应用包名
     for (size_t i = 0; i < DENY_LIST_SIZE; i++) {
         if (strstr(path, deny_list[i])) return 1;
+    }
+    // 匹配风险文件夹（新增：之前遗漏的文件夹黑名单匹配）
+    for (size_t i = 0; i < DENY_FOLDER_SIZE; i++) {
+        if (strstr(path, deny_folder_list[i])) return 1;
     }
     return 0;
 }
@@ -183,6 +189,7 @@ static int is_ad_blocked(const char *path) {
     if (!hma_ad_enabled || !path) return 0;
     char lower[PATH_MAX];
     strncpy(lower, path, PATH_MAX-1);
+    lower[PATH_MAX-1] = '\0'; // 修复：添加字符串结束符，避免越界
     for (char *s = lower; *s; s++) *s = tolower(*s);
     for (size_t i = 0; i < AD_FILE_KEYWORD_SIZE; i++) {
         if (strstr(lower, ad_file_keywords[i])) return 1;
@@ -194,14 +201,26 @@ static int can_block(const char *path) {
     const char *pkg_start = strstr(path, "/data/data/") ? path+10 : strstr(path, "/Android/data/") ? path+13 : NULL;
     if (!pkg_start) return 0;
     char pkg[MAX_PACKAGE_LEN] = {0};
-    strncpy(pkg, pkg_start, strchr(pkg_start, '/')-pkg_start);
+    // 修复：处理path中无 '/' 的情况，避免strchr返回NULL
+    char *pkg_end = strchr(pkg_start, '/');
+    if (pkg_end) {
+        strncpy(pkg, pkg_start, pkg_end - pkg_start);
+    } else {
+        strncpy(pkg, pkg_start, MAX_PACKAGE_LEN-1);
+    }
+    // 白名单应用直接放行
     for (size_t i = 0; i < WHITELIST_SIZE; i++) {
         if (!strcmp(pkg, whitelist[i])) return 0;
     }
+    // 包名哈希去重，2分钟内仅拦截一次
     unsigned long hash = 0;
     for (size_t i = 0; pkg[i]; i++) hash = hash*31 + pkg[i];
     unsigned long idx = hash % MAX_PACKAGE_LEN;
-    return (jiffies - last_blocked_time[idx] >= INTERVAL) ? (last_blocked_time[idx] = jiffies, 1) : 0;
+    if (jiffies - last_blocked_time[idx] >= INTERVAL) {
+        last_blocked_time[idx] = jiffies;
+        return 1;
+    }
+    return 0;
 }
 
 // 核心拦截钩子（添加符号检查）
