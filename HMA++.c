@@ -16,9 +16,7 @@
 #define __user
 #endif
 
-// 2. 弱引用所有依赖符号（缺失不崩溃，加载时检测）
-extern long kf_strncpy_from_user(char *dest, const void __user *src, long count) __attribute__((weak));
-extern long kf_copy_to_user(void __user *dest, const void *src, long count) __attribute__((weak));
+// 2. 仅声明KPM框架符号（删除kf_xxx重复声明，依赖头文件宏定义）
 extern hook_err_t hook_syscalln(int nr, int narg, void *before, void *after, void *udata) __attribute__((weak));
 extern void unhook_syscalln(int nr, void *before, void *after) __attribute__((weak));
 
@@ -58,10 +56,10 @@ KPM_NAME("HMA++ Next");
 KPM_VERSION("1.0.14");
 KPM_LICENSE("GPLv3");
 KPM_AUTHOR("NightFallsLikeRain");
-KPM_DESCRIPTION("非白名单拦截+核心应用放行（强兼容版）");
+KPM_DESCRIPTION("非白名单拦截+核心应用放行");
 
 // 核心宏定义
-#define MAX_PACKAGE_LEN 576
+#define MAX_PACKAGE_LEN 512
 #define ARG_SEPARATOR ','
 #define PATH_SEPARATOR '/'
 
@@ -116,11 +114,12 @@ static const char *app_whitelist[] = {
 };
 #define APP_WHITELIST_SIZE (sizeof(app_whitelist)/sizeof(app_whitelist[0]))
 
-// 广告拦截黑名单（不变）
+// 广告拦截黑名单（合并风险文件夹关键词，确保语法正确）
 static const char *ad_file_keywords[] = {
     "ad_", "_ad.", "ads_", "_ads.", "advertise", "adcache", "adimg", "advideo",
     "adbanner", "adpopup", "adpush", "adconfig", "adlog", "adstat", "adtrack",
-    "adservice", "adplugin", "admodule", "adlibrary", "adloader","xposed_temp", "lsposed_cache", "hook_inject_data", "xp_module_cache", "lspatch_temp",
+    "adservice", "adplugin", "admodule", "adlibrary", "adloader",
+    "xposed_temp", "lsposed_cache", "hook_inject_data", "xp_module_cache", "lspatch_temp",
     "system_modify", "root_tool_data", "magisk_temp", "ksu_cache", "kernel_mod_dir",
     "privacy_steal", "data_crack", "illegal_access", "info_collect", "secret_monitor",
     "apk_modify", "pirate_apk", "illegal_install", "app_cracked", "patch_apk_dir",
@@ -133,9 +132,9 @@ static const char *ad_file_keywords[] = {
 };
 #define AD_FILE_KEYWORD_SIZE (sizeof(ad_file_keywords)/sizeof(ad_file_keywords[0]))
 
-// 核心工具函数（替换compat_xxx为KPM兼容函数kf_xxx）
+// 核心工具函数（直接使用KPM头文件定义的kf_xxx函数）
 static int is_app_whitelisted(const char *path) {
-    if (!path || *path != PATH_SEPARATOR || !kf_strncpy_from_user) return 0;
+    if (!path || *path != PATH_SEPARATOR) return 0;
 
     const char *data_prefix = "/data/data/";
     const char *android_data_prefix = "/storage/emulated/0/Android/data/";
@@ -192,9 +191,9 @@ static int is_ad_blocked(const char *path) {
     return 0;
 }
 
-// 核心拦截钩子（仅保留核心syscall，符号检测）
+// 核心拦截钩子（仅保留核心syscall，直接使用kf_xxx函数）
 static void __used before_mkdirat(hook_fargs4_t *args, void *udata) {
-    if (!hma_running || !kf_strncpy_from_user) return;
+    if (!hma_running) return;
     char path[PATH_MAX];
     long len = kf_strncpy_from_user(path, (void *)syscall_argn(args, 1), PATH_MAX - 1);
     if (len <= 0) return;
@@ -208,7 +207,7 @@ static void __used before_mkdirat(hook_fargs4_t *args, void *udata) {
 }
 
 static void __used before_chdir(hook_fargs1_t *args, void *udata) {
-    if (!hma_running || !kf_strncpy_from_user) return;
+    if (!hma_running) return;
     char path[PATH_MAX];
     long len = kf_strncpy_from_user(path, (void *)syscall_argn(args, 0), PATH_MAX - 1);
     if (len <= 0) return;
@@ -225,13 +224,9 @@ static void __used before_chdir(hook_fargs1_t *args, void *udata) {
 static long __used mkdir_hook_init(const char *args, const char *event, void *__user reserved) {
     pr_info("===== 初始化开始（强兼容版） =====");
 
-    // 关键：检测所有依赖符号（缺失直接提示，不崩溃）
+    // 关键：检测KPM核心符号（hook_syscalln是框架入口，必须存在）
     if (!hook_syscalln) {
         pr_err("初始化失败：KPM未导出hook_syscalln符号！请升级KPM到1.1.0+");
-        return -EINVAL;
-    }
-    if (!kf_strncpy_from_user) {
-        pr_err("初始化失败：KPM未导出kf_strncpy_from_user符号！");
         return -EINVAL;
     }
 
@@ -257,7 +252,7 @@ static long __used mkdir_hook_init(const char *args, const char *event, void *__
     return 0;
 }
 
-// 控制接口（替换compat_copy_to_user为kf_copy_to_user）
+// 控制接口（使用KPM头文件定义的kf_copy_to_user）
 static long __used hma_control0(const char *args, char *__user out_msg, int outlen) {
     char msg[64] = "参数错误：使用'0/1,0/1'（全局,广告）";
     if (args && strlen(args) >= 3 && strchr(args, ARG_SEPARATOR)) {
@@ -271,7 +266,7 @@ static long __used hma_control0(const char *args, char *__user out_msg, int outl
         }
     }
 
-    if (outlen >= strlen(msg) + 1 && kf_copy_to_user) {
+    if (outlen >= strlen(msg) + 1) {
         kf_copy_to_user(out_msg, msg, strlen(msg) + 1);
     }
     return 0;
