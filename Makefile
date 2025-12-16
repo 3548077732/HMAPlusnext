@@ -1,6 +1,5 @@
 # 极简KPM模块Makefile（无额外依赖，通用所有Linux/Android内核）
-obj-m += HMA_Next.o
-HMA_Next-objs := HMA++.o  # 对应你的源码文件名
+objs := HMA++.o  # 对应你的源码文件名
 
 # 基础编译参数（禁用冗余优化，确保兼容性）
 EXTRA_CFLAGS += -Wall -Wextra -Wno-unused-parameter
