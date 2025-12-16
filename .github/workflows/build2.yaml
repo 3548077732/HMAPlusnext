@@ -31,16 +31,20 @@ jobs:
       - name: 🛠️ 安装编译依赖
         run: |
           sudo apt update -y
-          sudo apt install -y gcc make linux-headers-$(uname -r) libelf-dev bc flex bison dwarves
-          # 安装 KPM 工具链
-          git clone https://github.com/chenxyu/kpm.git /tmp/kpm
-          cd /tmp/kpm
-          make -j$(nproc)
-          sudo make install
+          sudo apt install -y gcc make linux-headers-$(uname -r) libelf-dev bc flex bison dwarves wget
+          # 修复：直接下载 KPM 预编译二进制（无需克隆仓库，避免认证问题）
+          KPM_VERSION="v1.0.0"  # 使用稳定版本（可根据需要更新）
+          KPM_BIN_URL="https://github.com/chenxyu/kpm/releases/download/${KPM_VERSION}/kpm-linux-amd64"
+          wget -q -O /tmp/kpm ${KPM_BIN_URL}
+          # 赋予执行权限并安装
+          chmod +x /tmp/kpm
+          sudo mv /tmp/kpm /usr/local/bin/
+          # 验证 KPM 安装成功
           if ! command -v kpm &> /dev/null; then
             echo "❌ 错误：KPM 工具安装失败！"
             exit 1
           fi
+          echo "✅ KPM 工具安装成功（版本：$(kpm --version)）"
           # 安装指定内核头文件（若用户输入）
           if [ -n "${{ github.event.inputs.kernel_version }}" ]; then
             sudo apt install -y linux-headers-${{ github.event.inputs.kernel_version }} || {
@@ -108,7 +112,7 @@ jobs:
 
       - name: 📝 构建报告（修复语法错误）
         run: |
-          # 修复：通过 Bash 条件判断处理内核版本显示，避免 YAML 语法冲突
+          # 修复：通过 Bash 条件判断处理内核版本显示
           if [ -n "${{ github.event.inputs.kernel_version }}" ]; then
             kernel_ver="${{ github.event.inputs.kernel_version }}"
           else
