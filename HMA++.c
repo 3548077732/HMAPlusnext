@@ -49,7 +49,7 @@ KPM_AUTHOR("NightFallsLikeRain");
 KPM_DESCRIPTION("风险拦截仅对白名单外应用生效（强兼容加载版）");
 
 // 核心宏定义
-#define MAX_PACKAGE_LEN 576
+#define MAX_PACKAGE_LEN 256
 #define ARG_SEPARATOR ','
 #define PATH_SEPARATOR '/'
 
