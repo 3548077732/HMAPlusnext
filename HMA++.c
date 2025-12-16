@@ -72,6 +72,7 @@ static bool is_risky(const char *path) {
     for (char *p = lower_path; *p; p++) {
         if (*p >= 'A' && *p <= 'Z') *p += 32;
     }
+    // 关键词匹配
     for (int i = 0; i < RISK_KEYWORD_COUNT; i++) {
         if (strstr(lower_path, risk_keywords[i])) {
             // 后缀二次校验，减少误判
@@ -95,31 +96,45 @@ static void hook_file_op(hook_fargs_t *args, void *udata) {
     char path[MAX_PATH_LEN] = {0};
     long len = 0;
     // 适配不同syscall的path参数位置（通用处理，无架构依赖）
-    if (args->syscall == __NR_mkdirat || args->syscall == __NR_unlinkat || 
-        args->syscall == __NR_openat) {
-        len = kp_strncpy_from_user(path, args->args[1], MAX_PATH_LEN-1); // path在第2个参数
-    } else if (args->syscall == __NR_rmdir || args->syscall == __NR_chdir) {
-        len = kp_strncpy_from_user(path, args->args[0], MAX_PATH_LEN-1); // path在第1个参数
-    } else if (args->syscall == __NR_renameat) {
-        // renameat需检查新旧路径，取任一风险路径即拦截
-        char new_path[MAX_PATH_LEN] = {0};
-        len = kp_strncpy_from_user(path, args->args[1], MAX_PATH_LEN-1);
-        long len_new = kp_strncpy_from_user(new_path, args->args[3], MAX_PATH_LEN-1);
-        if (len_new > 0 && is_risky(new_path)) strncpy(path, new_path, MAX_PATH_LEN-1);
+    switch (args->syscall) {
+        case __NR_mkdirat:
+        case __NR_unlinkat:
+        case __NR_openat:
+            len = kp_strncpy_from_user(path, args->args[1], MAX_PATH_LEN-1);
+            break;
+        case __NR_rmdir:
+        case __NR_chdir:
+            len = kp_strncpy_from_user(path, args->args[0], MAX_PATH_LEN-1);
+            break;
+        case __NR_renameat: {
+            // renameat需检查新旧路径，取任一风险路径即拦截
+            char new_path[MAX_PATH_LEN] = {0};
+            len = kp_strncpy_from_user(path, args->args[1], MAX_PATH_LEN-1);
+            long len_new = kp_strncpy_from_user(new_path, args->args[3], MAX_PATH_LEN-1);
+            if (len_new > 0 && is_risky(new_path)) {
+                strncpy(path, new_path, MAX_PATH_LEN-1);
+                len = len_new;
+            }
+            break;
+        }
+        default:
+            return; // 跳过未注册的syscall，避免无效计算
     }
     
+    // 路径有效性校验+白名单放行
     if (len <= 0 || is_legal(path)) return;
     path[len] = '\0';
     
-    if (is_risky(path) && strncmp(path, TARGET_PATH, TARGET_PATH_LEN) == 0) {
+    // 目标路径+风险双重校验，拦截非法操作
+    if (strncmp(path, TARGET_PATH, TARGET_PATH_LEN) == 0 && is_risky(path)) {
         pr_warn("[HMA++] Blocked risky op: %s (syscall: %d)\n", path, args->syscall);
         args->skip_origin = 1;
         args->ret = -EACCES;
     }
 }
 
-// 模块初始化（极简挂钩，无冗余错误处理）
-static long hma_init(void) {
+// 模块初始化（极简挂钩，符合KPM规范）
+static long hma_init(void *udata) {
     pr_info("[HMA++] Init (minimal kernel build)\n");
     // 统一挂钩核心文件操作syscall（KPM自动适配架构）
     hook_syscall(__NR_mkdirat, hook_file_op, NULL, NULL);
@@ -137,12 +152,14 @@ static long hma_ctl(const char __user *args, char __user *out, size_t out_len) {
     if (copy_from_user(buf, args, 1)) return -EFAULT;
     hma_enabled = (buf[0] == '1') ? true : false;
     const char *msg = hma_enabled ? "Enabled" : "Disabled";
-    if (out_len > strlen(msg)) copy_to_user(out, msg, strlen(msg)+1);
+    if (out_len > strlen(msg)) {
+        copy_to_user(out, msg, strlen(msg)+1);
+    }
     return 0;
 }
 
-// 模块退出（极简解钩，无残留）
-static long hma_exit(void) {
+// 模块退出（修复函数原型，符合KPM规范）
+static long hma_exit(void *udata) {
     pr_info("[HMA++] Exit\n");
     unhook_syscall(__NR_mkdirat, hook_file_op, NULL);
     unhook_syscall(__NR_chdir, hook_file_op, NULL);
@@ -153,7 +170,7 @@ static long hma_exit(void) {
     return 0;
 }
 
-// KPM注册（极简配置，符合框架规范）
+// KPM注册（严格遵循框架宏定义规范）
 KPM_INIT(hma_init);
 KPM_CTL0(hma_ctl);
 KPM_EXIT(hma_exit);
