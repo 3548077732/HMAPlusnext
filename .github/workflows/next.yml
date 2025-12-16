@@ -1,4 +1,3 @@
-# .github/workflows/build-hma-kpm.yml
 name: 手动构建 HMA++ Next KPM 模块
 on:
   workflow_dispatch:  # 手动触发核心
