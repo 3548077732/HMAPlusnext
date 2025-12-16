@@ -1,41 +1,43 @@
-// 补充内核必需头文件（极简核心依赖，无冗余）
-#include <linux/compiler_types.h>  // __user 宏定义（必需）
-#include <linux/compat.h>          // compat_xxx_from_user 函数（必需）
-#include <linux/jiffies.h>         // jiffies 时间戳（必需）
+// 移除所有新内核头文件，仅保留旧内核兼容的核心依赖
 #include <kpmodule.h>               // KPM框架核心（必需）
 #include <linux/printk.h>           // 日志输出（必需）
-#include <linux/uaccess.h>          // 用户空间访问基础（必需）
+#include <linux/uaccess.h>          // 旧内核用户空间访问（含 strncpy_from_user）
 #include <syscall.h>                // 系统调用挂钩接口（必需）
 #include <linux/string.h>           // 字符串操作（必需）
 #include <linux/errno.h>            // 错误码定义（必需）
 #include <uapi/linux/limits.h>      // PATH_MAX 常量（必需）
-#include <linux/kernel.h>           // 内核基础功能（必需）
+#include <linux/kernel.h>           // 内核基础功能（含 jiffies 旧内核定义）
 
-// 显式声明内核符号（兼容不同内核版本）
+// 适配旧内核：手动定义 __user 宏（避免依赖 compiler_types.h）
+#ifndef __user
+#define __user
+#endif
+
+// 显式声明内核符号（兼容旧内核，确保符号可见）
 extern unsigned long jiffies;
 extern hook_err_t hook_syscalln(int nr, int narg, void *before, void *after, void *udata);
 extern void unhook_syscalln(int nr, void *before, void *after);
 
 // 模块元信息（KPM标准宏）
 KPM_NAME("HMA++ Next");
-KPM_VERSION("1.0.9");
+KPM_VERSION("1.0.10");
 KPM_LICENSE("GPLv3");
 KPM_AUTHOR("NightFallsLikeRain");
-KPM_DESCRIPTION("全应用风险+广告拦截（2分钟检测间隔+核心白名单）");
+KPM_DESCRIPTION("全应用风险+广告拦截（旧内核兼容+2分钟检测间隔）");
 
-// 核心宏定义（内核原生，无依赖）
+// 核心宏定义（旧内核原生支持）
 #define MAX_PACKAGE_LEN 256
 #define ARG_SEPARATOR ','
 #define PATH_SEPARATOR '/'
-#define HZ 100                  // 通用内核HZ值
+#define HZ 100                  // 旧内核通用HZ值
 #define INTERVAL 2 * 60 * HZ    // 2分钟检测间隔
 
-// 全局变量（静态初始化）
+// 全局变量（静态初始化，旧内核兼容）
 static bool hma_running = true;
 static bool hma_ad_enabled = true;
 static unsigned long last_blocked_time[MAX_PACKAGE_LEN] = {0};
 
-// 核心白名单（修复语法错误：补充缺失逗号）
+// 核心白名单（语法正确）
 static const char *whitelist[] = {
     "com.tencent.mm", "com.tencent.mobileqq", "com.tencent.minihd.qq", "com.tencent.wework",
     "com.android.systemui", "com.android.settings", "com.android.phone", "com.android.contacts",
@@ -112,7 +114,7 @@ static const char *ad_file_keywords[] = {
 };
 #define AD_FILE_KEYWORD_SIZE (sizeof(ad_file_keywords)/sizeof(ad_file_keywords[0]))
 
-// 函数原型声明（严格匹配定义，避免隐式声明警告）
+// 函数原型声明（适配旧内核接口）
 static int is_whitelisted(const char *path);
 static int is_blocked_path(const char *path);
 static int is_ad_blocked(const char *path);
@@ -125,10 +127,10 @@ static void before_rmdir(hook_fargs1_t *args, void *udata);
 static void before_unlinkat(hook_fargs4_t *args, void *udata);
 static void before_openat(hook_fargs5_t *args, void *udata);
 static void before_renameat(hook_fargs4_t *args, void *udata);
-static long mkdir_hook_init(const char *args, const char *event, void __user *reserved);
-static long hma_control0(const char *ctl_args, char __user *out_msg, int outlen);
+static long mkdir_hook_init(const char *args, const char *event, void *reserved);
+static long hma_control0(const char *ctl_args, char *out_msg, int outlen);
 static long hma_control1(void *a1, void *a2, void *a3);
-static long mkdir_hook_exit(void __user *reserved);
+static long mkdir_hook_exit(void *reserved);
 
 // 1. 白名单校验
 static int is_whitelisted(const char *path) {
@@ -244,6 +246,7 @@ static int can_block(const char *path) {
     }
     unsigned long pkg_index = hash % MAX_PACKAGE_LEN;
 
+    // 旧内核 jiffies 直接使用，无需额外头文件
     unsigned long current_time = jiffies;
     unsigned long time_diff = current_time - last_blocked_time[pkg_index];
 
@@ -254,11 +257,12 @@ static int can_block(const char *path) {
     return 0;
 }
 
-// 核心拦截钩子
+// 核心拦截钩子（用旧内核原生函数 strncpy_from_user 替代 compat_ 版本）
 static void __used before_mkdirat(hook_fargs4_t *args, void *udata) {
     if (!hma_running) return;
     char path[PATH_MAX];
-    long len = compat_strncpy_from_user(path, (void *)syscall_argn(args, 1), PATH_MAX - 1);
+    // 旧内核用 strncpy_from_user，替代 compat_strncpy_from_user
+    long len = strncpy_from_user(path, (void *)syscall_argn(args, 1), PATH_MAX - 1);
     if (len <= 0 || is_whitelisted(path)) return;
     path[len] = '\0';
     if ((is_blocked_path(path) || is_ad_blocked(path)) && can_block(path)) {
@@ -271,7 +275,7 @@ static void __used before_mkdirat(hook_fargs4_t *args, void *udata) {
 static void __used before_chdir(hook_fargs1_t *args, void *udata) {
     if (!hma_running) return;
     char path[PATH_MAX];
-    long len = compat_strncpy_from_user(path, (void *)syscall_argn(args, 0), PATH_MAX - 1);
+    long len = strncpy_from_user(path, (void *)syscall_argn(args, 0), PATH_MAX - 1);
     if (len <= 0 || is_whitelisted(path)) return;
     path[len] = '\0';
     if ((is_blocked_path(path) || is_ad_blocked(path)) && can_block(path)) {
@@ -285,7 +289,7 @@ static void __used before_chdir(hook_fargs1_t *args, void *udata) {
 static void __used before_rmdir(hook_fargs1_t *args, void *udata) {
     if (!hma_running) return;
     char path[PATH_MAX];
-    long len = compat_strncpy_from_user(path, (void *)syscall_argn(args, 0), PATH_MAX - 1);
+    long len = strncpy_from_user(path, (void *)syscall_argn(args, 0), PATH_MAX - 1);
     if (len <= 0 || is_whitelisted(path)) return;
     path[len] = '\0';
     if ((is_blocked_path(path) || is_ad_blocked(path)) && can_block(path)) {
@@ -300,7 +304,7 @@ static void __used before_rmdir(hook_fargs1_t *args, void *udata) {
 static void __used before_unlinkat(hook_fargs4_t *args, void *udata) {
     if (!hma_running) return;
     char path[PATH_MAX];
-    long len = compat_strncpy_from_user(path, (void *)syscall_argn(args, 1), PATH_MAX - 1);
+    long len = strncpy_from_user(path, (void *)syscall_argn(args, 1), PATH_MAX - 1);
     if (len <= 0 || is_whitelisted(path)) return;
     path[len] = '\0';
     if ((is_blocked_path(path) || is_ad_blocked(path)) && can_block(path)) {
@@ -315,7 +319,7 @@ static void __used before_unlinkat(hook_fargs4_t *args, void *udata) {
 static void __used before_openat(hook_fargs5_t *args, void *udata) {
     if (!hma_running) return;
     char path[PATH_MAX];
-    long len = compat_strncpy_from_user(path, (void *)syscall_argn(args, 1), PATH_MAX - 1);
+    long len = strncpy_from_user(path, (void *)syscall_argn(args, 1), PATH_MAX - 1);
     if (len <= 0 || is_whitelisted(path)) return;
     path[len] = '\0';
     if ((is_blocked_path(path) || is_ad_blocked(path)) && can_block(path)) {
@@ -330,8 +334,8 @@ static void __used before_openat(hook_fargs5_t *args, void *udata) {
 static void __used before_renameat(hook_fargs4_t *args, void *udata) {
     if (!hma_running) return;
     char old_path[PATH_MAX], new_path[PATH_MAX];
-    long len_old = compat_strncpy_from_user(old_path, (void *)syscall_argn(args, 1), PATH_MAX - 1);
-    long len_new = compat_strncpy_from_user(new_path, (void *)syscall_argn(args, 3), PATH_MAX - 1);
+    long len_old = strncpy_from_user(old_path, (void *)syscall_argn(args, 1), PATH_MAX - 1);
+    long len_new = strncpy_from_user(new_path, (void *)syscall_argn(args, 3), PATH_MAX - 1);
     if (len_old <= 0 || len_new <= 0) return;
     old_path[len_old] = '\0';
     new_path[len_new] = '\0';
@@ -346,10 +350,10 @@ static void __used before_renameat(hook_fargs4_t *args, void *udata) {
 }
 #endif
 
-// 模块生命周期
-static long __used mkdir_hook_init(const char *args, const char *event, void __user *reserved) {
+// 模块生命周期（移除 __user 标记，旧内核兼容）
+static long __used mkdir_hook_init(const char *args, const char *event, void *reserved) {
     hook_err_t err;
-    pr_info("[HMA++] init start（2分钟检测间隔）\n");
+    pr_info("[HMA++] init start（旧内核兼容+2分钟间隔）\n");
 
     err = hook_syscalln((int)__NR_mkdirat, 3, before_mkdirat, NULL, NULL);
     if (err) { pr_err("[HMA++] hook mkdirat err: %d\n", err); return -EINVAL; }
@@ -372,8 +376,8 @@ static long __used mkdir_hook_init(const char *args, const char *event, void __u
     return 0;
 }
 
-// 双开关控制接口（修复__user指针语法）
-static long __used hma_control0(const char *ctl_args, char __user *out_msg, int outlen) {
+// 双开关控制接口（用旧内核原生 copy_to_user 替代 compat_copy_to_user）
+static long __used hma_control0(const char *ctl_args, char *out_msg, int outlen) {
     char msg[64] = {0};
     if (!ctl_args || strlen(ctl_args) < 3 || !strchr(ctl_args, ARG_SEPARATOR)) {
         strncpy(msg, "args err: use '0/1,0/1' (global,ad)", sizeof(msg)-1);
@@ -395,7 +399,8 @@ static long __used hma_control0(const char *ctl_args, char __user *out_msg, int 
 
 out_copy:
     if (outlen >= strlen(msg) + 1) {
-        compat_copy_to_user(out_msg, msg, strlen(msg) + 1);
+        // 旧内核用 copy_to_user，替代 compat_copy_to_user
+        copy_to_user(out_msg, msg, strlen(msg) + 1);
     }
     return 0;
 }
@@ -406,7 +411,7 @@ static long __used hma_control1(void *a1, void *a2, void *a3) {
 }
 
 // 模块退出
-static long __used mkdir_hook_exit(void __user *reserved) {
+static long __used mkdir_hook_exit(void *reserved) {
     pr_info("[HMA++] exit start\n");
     unhook_syscalln((int)__NR_mkdirat, before_mkdirat, NULL);
     unhook_syscalln((int)__NR_chdir, before_chdir, NULL);
