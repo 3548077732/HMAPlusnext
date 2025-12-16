@@ -10,26 +10,29 @@
 #include <linux/errno.h>
 #include <uapi/linux/limits.h>
 #include <linux/kernel.h>
+#include <linux/time.h> // 引入时间相关声明
 
 // 模块元信息
 KPM_NAME("HMA++ Next");
-KPM_VERSION("1.0.10"); // 标识警告修复版本
+KPM_VERSION("1.0.11"); // 标识最终适配版本
 KPM_LICENSE("GPLv3");
 KPM_AUTHOR("NightFallsLikeRain");
-KPM_DESCRIPTION("全应用风险+广告拦截（零警告版，含微信/QQ/银行/系统软件白名单）");
+KPM_DESCRIPTION("全应用风险+广告拦截（最终编译版，含微信/QQ/银行/系统软件白名单）");
 
-// 核心宏定义（兼容优先，无冲突依赖）
+// 核心宏定义（适配KPM+内核，无冲突）
 #define MAX_PACKAGE_LEN 256       // 合理大小，避免内存溢出
 #define ARG_SEPARATOR ','
 #define PATH_SEPARATOR '/'
-#define TICK_INTERVAL 120         // 2分钟间隔（直接用秒，无HZ依赖）
+#define HZ 100                     // 通用内核HZ值，兼容绝大多数环境
+#define INTERVAL 2 * 60 * HZ       // 2分钟=120秒*100=12000 jiffies
+extern unsigned long jiffies;      // 显式声明jiffies，兼容无jiffies.h环境
 
 // 全局开关（双开关设计）
 static bool hma_running = true;        // 总开关
 static bool hma_ad_enabled = true;     // 广告拦截独立开关
 
-// 时间戳映射（替换jiffies，使用秒级计数器）
-static unsigned long last_blocked_tick[MAX_PACKAGE_LEN] = {0};
+// 时间戳映射（恢复jiffies机制，确保时间控制正常）
+static unsigned long last_blocked_time[MAX_PACKAGE_LEN] = {0};
 
 // 函数原型声明（避免隐式声明错误）
 static char *get_package_name(const char *path);
@@ -239,7 +242,7 @@ static int is_ad_blocked(const char *path) {
     return 0;
 }
 
-// 4. 拦截时间间隔控制（无jiffies依赖，兼容加载）
+// 4. 拦截时间间隔控制（恢复jiffies，确保兼容）
 static int can_block(const char *path) {
     if (!path || *path != PATH_SEPARATOR) return 0;
 
@@ -274,18 +277,18 @@ static int can_block(const char *path) {
         hash = (hash * 31) + pkg_name[i];
     }
 
-    // 使用内核通用函数get_seconds()，无符号依赖
-    unsigned long current_tick = get_seconds();
-    unsigned long tick_diff = current_tick - last_blocked_tick[hash % MAX_PACKAGE_LEN];
+    // 使用jiffies计算时间差（显式声明，无头文件依赖）
+    unsigned long current_time = jiffies;
+    unsigned long time_diff = current_time - last_blocked_time[hash % MAX_PACKAGE_LEN];
 
-    if (tick_diff >= TICK_INTERVAL) {
-        last_blocked_tick[hash % MAX_PACKAGE_LEN] = current_tick;
+    if (time_diff >= INTERVAL) {
+        last_blocked_time[hash % MAX_PACKAGE_LEN] = current_time;
         return 1;
     }
     return 0;
 }
 
-// 核心拦截钩子（添加__used属性，消除未使用警告）
+// 核心拦截钩子（添加__used属性，消除未使用警告；使用KPM原生接口）
 static void __used before_mkdirat(hook_fargs4_t *args, void *udata) {
     if (!hma_running) return;
     char path[PATH_MAX];
@@ -448,31 +451,31 @@ static char *get_package_name(const char *path) {
     return pkg_name;
 }
 
-// 模块生命周期（KPM标准接口，确保加载兼容）
+// 模块生命周期（恢复KPM原生hook_syscalln接口，确保适配）
 static long mkdir_hook_init(const char *args, const char *event, void *__user reserved) {
     hook_err_t err;
-    pr_info("[HMA++] init start (零警告版)\n");
+    pr_info("[HMA++] init start (最终编译版)\n");
 
-    // 使用KPM标准挂钩接口，自动适配参数个数
-    err = hook_syscall(__NR_mkdirat, (hook_func_t)before_mkdirat, NULL, NULL);
+    // 使用KPM原生hook_syscalln接口，指定正确的syscall参数个数
+    err = hook_syscalln(__NR_mkdirat, 3, before_mkdirat, NULL, NULL);
     if (err) { pr_err("[HMA++] hook mkdirat err: %d\n", err); return -EINVAL; }
-    err = hook_syscall(__NR_chdir, (hook_func_t)before_chdir, NULL, NULL);
+    err = hook_syscalln(__NR_chdir, 1, before_chdir, NULL, NULL);
     if (err) { pr_err("[HMA++] hook chdir err: %d\n", err); return -EINVAL; }
 #if defined(__NR_rmdir)
-    hook_syscall(__NR_rmdir, (hook_func_t)before_rmdir, NULL, NULL);
+    hook_syscalln(__NR_rmdir, 1, before_rmdir, NULL, NULL);
 #endif
 #if defined(__NR_unlinkat)
-    hook_syscall(__NR_unlinkat, (hook_func_t)before_unlinkat, NULL, NULL);
+    hook_syscalln(__NR_unlinkat, 4, before_unlinkat, NULL, NULL);
 #endif
 #ifdef __NR_openat
-    hook_syscall(__NR_openat, (hook_func_t)before_openat, NULL, NULL);
+    hook_syscalln(__NR_openat, 5, before_openat, NULL, NULL);
 #endif
 #ifdef __NR_renameat
-    hook_syscall(__NR_renameat, (hook_func_t)before_renameat, NULL, NULL);
+    hook_syscalln(__NR_renameat, 4, before_renameat, NULL, NULL);
 #endif
 
     pr_info("[HMA++] init success (global: %d, ad: %d, interval: %ds)\n", 
-            hma_running, hma_ad_enabled, TICK_INTERVAL);
+            hma_running, hma_ad_enabled, INTERVAL / HZ);
     return 0;
 }
 
@@ -509,22 +512,22 @@ static long hma_control1(void *a1, void *a2, void *a3) {
     return 0;
 }
 
-// 模块退出（标准解钩接口）
+// 模块退出（恢复KPM原生unhook_syscalln接口）
 static long mkdir_hook_exit(void *__user reserved) {
     pr_info("[HMA++] exit start\n");
-    unhook_syscall(__NR_mkdirat, (hook_func_t)before_mkdirat, NULL);
-    unhook_syscall(__NR_chdir, (hook_func_t)before_chdir, NULL);
+    unhook_syscalln(__NR_mkdirat, before_mkdirat, NULL);
+    unhook_syscalln(__NR_chdir, before_chdir, NULL);
 #if defined(__NR_rmdir)
-    unhook_syscall(__NR_rmdir, (hook_func_t)before_rmdir, NULL);
+    unhook_syscalln(__NR_rmdir, before_rmdir, NULL);
 #endif
 #if defined(__NR_unlinkat)
-    unhook_syscall(__NR_unlinkat, (hook_func_t)before_unlinkat, NULL);
+    unhook_syscalln(__NR_unlinkat, before_unlinkat, NULL);
 #endif
 #ifdef __NR_openat
-    unhook_syscall(__NR_openat, (hook_func_t)before_openat, NULL);
+    unhook_syscalln(__NR_openat, before_openat, NULL);
 #endif
 #ifdef __NR_renameat
-    unhook_syscall(__NR_renameat, (hook_func_t)before_renameat, NULL);
+    unhook_syscalln(__NR_renameat, before_renameat, NULL);
 #endif
     pr_info("[HMA++] exit success\n");
     return 0;
