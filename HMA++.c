@@ -10,7 +10,6 @@
 #include <linux/errno.h>
 #include <uapi/linux/limits.h>
 #include <linux/kernel.h>
-#include <linux/jiffies.h>  // 引入HZ定义所需头文件
 
 // 模块元信息
 KPM_NAME("HMA++ Next");
@@ -19,11 +18,12 @@ KPM_LICENSE("GPLv3");
 KPM_AUTHOR("NightFallsLikeRain");
 KPM_DESCRIPTION("全应用风险+广告拦截（含微信/QQ/银行/系统软件白名单）");
 
-// 核心宏定义（移除路径限制，适配所有应用）
-#define MAX_PACKAGE_LEN 256
+// 核心宏定义（移除jiffies.h依赖，兼容所有编译环境）
+#define MAX_PACKAGE_LEN 2064
 #define ARG_SEPARATOR ','
 #define PATH_SEPARATOR '/'
-#define INTERVAL 2 * 60 * HZ // 2分钟（以jiffies计）
+#define HZ 100 // 通用内核HZ值（100滴答/秒，兼容绝大多数环境）
+#define INTERVAL 2 * 60 * HZ // 2分钟=120秒*100=12000 jiffies
 
 // 全局开关（双开关设计，保持极简）
 static bool hma_running = true;        // 总开关
@@ -75,7 +75,10 @@ static const char *whitelist[] = {
     "com.oppo.launcher",       // OPPO桌面
     "com.vivo.launcher",       // VIVO桌面
     "com.samsung.android.launcher", // 三星桌面
-    "com.meizu.flyme.launcher" // 魅族桌面
+    "com.meizu.flyme.launcher",  // 魅族桌面
+    "com.miui.home",
+    "com.sukisu.ultra",
+    "com.larus.nova"
 };
 #define WHITELIST_SIZE (sizeof(whitelist)/sizeof(whitelist[0]))
 
@@ -292,7 +295,7 @@ static int can_block(const char *path) {
         hash = (hash * 31) + pkg_name[i];
     }
 
-    // 计算当前时间与最近一次拦截时间的差值
+    // 计算当前时间与最近一次拦截时间的差值（jiffies是内核全局变量，无需头文件）
     unsigned long current_time = jiffies;
     unsigned long time_diff = current_time - last_blocked_time[hash % MAX_PACKAGE_LEN];
 
@@ -519,8 +522,8 @@ static long mkdir_hook_init(const char *args, const char *event, void *__user re
     hook_syscalln(__NR_renameat, 4, before_renameat, NULL, NULL);
 #endif
 
-    pr_info("[HMA++] init success (global: %d, ad: %d, interval: %d seconds)\n", 
-            hma_running, hma_ad_enabled, INTERVAL / HZ);
+    pr_info("[HMA++] init success (global: %d, ad: %d, interval: 120 seconds)\n", 
+            hma_running, hma_ad_enabled);
     return 0;
 }
 
