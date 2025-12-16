@@ -25,6 +25,9 @@ KPM_DESCRIPTION("全应用风险+广告拦截（含微信/QQ/银行/系统软件
 #define HZ 100 // 通用内核HZ值（100滴答/秒，兼容绝大多数环境）
 #define INTERVAL 2 * 60 * HZ // 2分钟=120秒*100=12000 jiffies
 
+// 声明jiffies全局变量（解决未定义错误，无需头文件）
+extern unsigned long jiffies;
+
 // 全局开关（双开关设计，保持极简）
 static bool hma_running = true;        // 总开关
 static bool hma_ad_enabled = true;     // 广告拦截独立开关
@@ -133,8 +136,7 @@ static const char *deny_folder_list[] = {
     "emulator_data", "virtual_env", "fake_device", "emulator_cache", "virtual_device",
     "ad_plugin", "malicious_plugin", "ad_cache", "plugin_hack", "ad_inject",
     "data_modify", "crack_data", "modify_logs", "crack_cache", "data_hack",
-    "tool_residue", "illegal_backup", "hack_residue", "backup_crack", "tool_cache",
-    "MiShopSkyTreeBundleProvider", "release"
+    "tool_residue", "illegal_backup", "hack_residue", "backup_crack", "tool_cache"
 };
 #define DENY_FOLDER_SIZE (sizeof(deny_folder_list)/sizeof(deny_folder_list[0]))
 
@@ -295,7 +297,7 @@ static int can_block(const char *path) {
         hash = (hash * 31) + pkg_name[i];
     }
 
-    // 计算当前时间与最近一次拦截时间的差值（jiffies是内核全局变量，无需头文件）
+    // 计算当前时间与最近一次拦截时间的差值（已声明jiffies）
     unsigned long current_time = jiffies;
     unsigned long time_diff = current_time - last_blocked_time[hash % MAX_PACKAGE_LEN];
 
