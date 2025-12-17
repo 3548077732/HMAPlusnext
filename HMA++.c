@@ -1,22 +1,24 @@
+// 新增：适配不同内核版本的兼容宏（避免头文件依赖冲突）
+#define __KERNEL__
+#define MODULE
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/fs.h>
 #include <linux/syscalls.h>
-#include <kpm.h>  // KPM 内核模块必需头文件
+#include <linux/uaccess.h>  // 补充 copy_from_user 依赖头文件
+#include <kpm.h>
 
-// 模块信息（保持你的配置）
 MODULE_LICENSE("GPL v2");
 MODULE_AUTHOR("NightFallsLikeRain");
 MODULE_DESCRIPTION("HMA++ Next - Android 应用风险与广告拦截模块");
 MODULE_VERSION("1.0");
 
-// 总开关（添加 __unused 消除未使用警告）
 static bool hma_running __unused = true;
 
-// 白名单应用包名（示例，可根据需求扩展）
+// 白名单应用包名（可根据实际需求修改）
 static const char *whitelist_packages[] = {
-    "com.android.systemui",
+   "com.android.systemui",
     "com.google.android.gms",
     "com.android.settings",
     "com.tencent.mm",          // 微信
@@ -93,10 +95,9 @@ static const char *whitelist_packages[] = {
     "com.tencent.tmgp.dfm"
 };
 
-// 声明：检查当前进程是否在白名单中
 static bool is_in_whitelist(void) {
     char comm[TASK_COMM_LEN];
-    get_task_comm(comm, current);  // 获取当前进程名称（对应应用包名）
+    get_task_comm(comm, current);
     
     for (size_t i = 0; i < ARRAY_SIZE(whitelist_packages); i++) {
         if (strcmp(comm, whitelist_packages[i]) == 0) {
@@ -106,13 +107,12 @@ static bool is_in_whitelist(void) {
     return false;
 }
 
-// 声明：广告路径匹配（用于 should_block_ad，消除未使用警告）
 static bool should_block_ad(const char *path) {
     const char *ad_paths[] = {
         "/sdcard/Android/data/*/cache/ad",
         "/data/data/*/files/ad",
         "/mnt/sdcard/AdCache",
-        "ad.jpg", "ad.png", "ad_video"  // 常见广告资源关键词
+        "ad.jpg", "ad.png", "ad_video"
     };
     
     for (size_t i = 0; i < ARRAY_SIZE(ad_paths); i++) {
@@ -123,20 +123,18 @@ static bool should_block_ad(const char *path) {
     return false;
 }
 
-// 关键修复 1：添加函数原型声明（解决隐式声明错误）
 static void before_file_op(void *args, int syscall_num);
 
-// 关键修复 2：按系统调用类型定义参数结构体（适配不同 hook_fargsN_t）
 typedef struct {
     const char __user *pathname;
-} hook_args1_t;  // 对应 hook_fargs1_t（1 个字符串参数）
+} hook_args1_t;
 
 typedef struct {
     int dirfd;
     const char __user *pathname;
     int flags;
     umode_t mode;
-} hook_args4_t;  // 对应 hook_fargs4_t（4 个参数）
+} hook_args4_t;
 
 typedef struct {
     int dirfd;
@@ -144,18 +142,16 @@ typedef struct {
     int flags;
     umode_t mode;
     unsigned int resolve;
-} hook_args5_t;  // 对应 hook_fargs5_t（5 个参数）
+} hook_args5_t;
 
-// 核心文件操作拦截逻辑（关键修复：用 void* 兼容不同参数类型）
 static void before_file_op(void *args, int syscall_num) {
     if (!hma_running || is_in_whitelist()) {
-        return;  // 白名单应用直接放行
+        return;
     }
 
     char path[PATH_MAX] = {0};
     const char __user *user_path = NULL;
 
-    // 关键修复 3：根据系统调用号转换参数类型，提取文件路径
     switch (syscall_num) {
         case __NR_chdir:
         case __NR_rmdir:
@@ -173,22 +169,18 @@ static void before_file_op(void *args, int syscall_num) {
             return;
     }
 
-    // 拷贝用户空间路径到内核空间（安全检查）
     if (copy_from_user(path, user_path, PATH_MAX) != 0) {
         return;
     }
 
-    // 风险拦截逻辑（广告路径 + 敏感操作）
     if (should_block_ad(path) || syscall_num == __NR_unlinkat || syscall_num == __NR_rmdir) {
-        printk(KERN_INFO "HMA++: Blocked risky file op [pid:%d, pkg:%s, path:%s, syscall:%d]\n",
+        printk(KERN_INFO "HMA++: Blocked risky op [pid:%d, pkg:%s, path:%s, syscall:%d]\n",
                current->tgid, current->comm, path, syscall_num);
-        // 拦截系统调用（返回权限拒绝）
         current->thread_info->syscall_work |= SYSCALL_WORK_STOP;
         current->thread_info->syscall_ret = -EPERM;
     }
 }
 
-// 系统调用 hook 实现（关键修复：参数类型匹配 + 正确转换）
 static void before_mkdirat(hook_fargs4_t *args, void *udata) {
     before_file_op((void *)args, __NR_mkdirat);
 }
@@ -213,7 +205,6 @@ static void before_renameat(hook_fargs4_t *args, void *udata) {
     before_file_op((void *)args, __NR_renameat);
 }
 
-// 关键修复 4：注册 hook 函数（消除未使用警告，确保模块生效）
 static const struct kpm_hook syscall_hooks[] __initconst = {
     KPM_HOOK(__NR_mkdirat, before_mkdirat, NULL),
     KPM_HOOK(__NR_chdir, before_chdir, NULL),
@@ -223,18 +214,16 @@ static const struct kpm_hook syscall_hooks[] __initconst = {
     KPM_HOOK(__NR_renameat, before_renameat, NULL),
 };
 
-// 模块加载函数
 static int __init hma_init(void) {
     int ret = kpm_register_hooks(syscall_hooks, ARRAY_SIZE(syscall_hooks));
     if (ret == 0) {
-        printk(KERN_INFO "HMA++ Next loaded successfully (whitelist mode enabled)\n");
+        printk(KERN_INFO "HMA++ Next loaded successfully (whitelist mode)\n");
     } else {
         printk(KERN_ERR "HMA++ Next load failed: %d\n", ret);
     }
     return ret;
 }
 
-// 模块卸载函数
 static void __exit hma_exit(void) {
     kpm_unregister_hooks(syscall_hooks, ARRAY_SIZE(syscall_hooks));
     printk(KERN_INFO "HMA++ Next unloaded\n");
@@ -242,3 +231,6 @@ static void __exit hma_exit(void) {
 
 module_init(hma_init);
 module_exit(hma_exit);
+
+// 新增：解决部分内核版本的符号导出警告
+MODULE_EXPORT_SYMBOL_GPL(hma_running);
