@@ -19,7 +19,7 @@ KPM_AUTHOR("NightFallsLikeRain");
 KPM_DESCRIPTION("全应用风险+广告拦截（含微信/QQ/银行/系统软件白名单）");
 
 // 核心宏定义（移除路径限制，适配所有应用）
-#define MAX_PACKAGE_LEN 576
+#define MAX_PACKAGE_LEN 256
 #define ARG_SEPARATOR ','
 #define PATH_SEPARATOR '/'
 
