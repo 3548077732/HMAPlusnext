@@ -1,39 +1,62 @@
-name: 手动构建 HMA++ Next KPM 模块
+name: Apatch KPM Build (Kernel 5.15+)
 on:
-  workflow_dispatch:  # 手动触发核心
+  workflow_dispatch:  # 手动触发开关
     inputs:
-      kernel_version:
-        description: "指定内核版本（如 5.15.0-78-generic，留空用默认）"
-        required: false
-        default: ""
-      build_mode:
-        description: "构建模式"
-        type: choice
+      kernel_arch:
+        description: "设备架构（arm64/arm）"
         required: true
-        default: "release"
+        default: "arm64"
+        type: choice
         options:
-          - release  # 发布模式（精简体积，无调试信息）
-          - debug    # 调试模式（保留调试信息，便于排查）
+          - arm64
+          - arm
 
 jobs:
-  build-kpm:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write  # 用于上传KPM产物
-
+  build:
+    runs-on: ubuntu-22.04
     steps:
-      - name: 🔍 检出代码
+      # 1. 拉取代码
+      - name: Checkout Code
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 1  # 仅拉取最新代码，加速构建
 
-      - name: 🛠️ 安装编译依赖（含 KPM 工具链）
+      # 2. 安装编译依赖
+      - name: Install Dependencies
         run: |
-          sudo apt update -y
-          # 基础编译工具
-          sudo apt install -y gcc make linux-headers-$(uname -r) libelf-dev bc flex bison dwarves
-          # 安装 KPM 框架工具链（打包 .kpm 必需）
-          git clone https://github.com/chenxyu/kpm.git /tmp/kpm
+          sudo apt update
+          sudo apt install -y build-essential git wget gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf
+
+      # 3. 下载Apatch内核5.15+预编译头文件
+      - name: Download Kernel 5.15+ Headers
+        run: |
+          if [ "${{ github.event.inputs.kernel_arch }}" = "arm64" ]; then
+            wget https://github.com/apatch-project/apatch-kernel-headers/raw/main/headers-5.15-arm64.tar.gz -O kernel-headers.tar.gz
+          else
+            wget https://github.com/apatch-project/apatch-kernel-headers/raw/main/headers-5.15-arm.tar.gz -O kernel-headers.tar.gz
+          fi
+          tar -zxvf kernel-headers.tar.gz -C ./kernel-headers
+
+      # 4. 编译KPM模块
+      - name: Build HMA++ KPM Module
+        run: |
+          export KERNELDIR=$(pwd)/kernel-headers
+          export ARCH=${{ github.event.inputs.kernel_arch }}
+          if [ "$ARCH" = "arm64" ]; then
+            export CROSS_COMPILE=aarch64-linux-gnu-
+          else
+            export CROSS_COMPILE=arm-linux-gnueabihf-
+          fi
+          make -j$(nproc)
+
+      # 5. 上传编译产物（供下载）
+      - name: Upload Build Output
+        uses: actions/upload-artifact@v4
+        with:
+          name: HMA++-Next-KPM-${{ github.event.inputs.kernel_arch }}
+          path: |
+            HMA++.ko
+            .config
+            Makefile
+          retention-days: 90  # 产物保留90天
           cd /tmp/kpm
           make -j$(nproc)
           sudo make install
