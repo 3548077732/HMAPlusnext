@@ -1,24 +1,18 @@
-# Apatch KPM编译配置（内核5.15+）
+# HMA++ Next KPM Module Makefile
+# Author: NightFallsLikeRain
+# 适配 Apatch KPM + Android 5.15+ 内核 + NDK r25c
+
+# 模块名称（必须与最终生成的 .ko 文件名一致）
 obj-m += HMA++.o
-KERNELDIR ?= /usr/src/linux-headers-$(shell uname -r)
-CROSS_COMPILE ?= aarch64-linux-android-
-ARCH ?= arm64
-EXTRA_CFLAGS += -Wall -Wextra -DKERNEL_5_15_PLUS
 
-# 强制指定头文件路径（解决缺失问题）
-EXTRA_CFLAGS += -I$(PWD) -I$(KERNELDIR)/include -I$(KERNELDIR)/arch/arm64/include
+# 模块依赖源码文件（根据你的实际源码调整，比如 main.c、whitelist.c 等）
+# 格式：模块名-objs := 源文件1.o 源文件2.o ...（无需写 .c 后缀）
+HMA++-objs := main.o whitelist.o file_intercept.o ad_block.o
 
+# 编译规则（命令前必须是 Tab 键，不能用空格！）
 all:
-    $(MAKE) -j$(nproc) -C $(KERNELDIR) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) EXTRA_CFLAGS="$(EXTRA_CFLAGS)" M=$(PWD) modules
+	$(MAKE) -C $(KERNELDIR) M=$(PWD) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) modules
 
 clean:
-    $(MAKE) -C $(KERNELDIR) ARCH=$(ARCH) M=$(PWD) clean
-    rm -rf *.ko *.mod.* *.symvers *.order .tmp_versions
-		echo "❌ 错误：KPM 打包失败，未生成 HMA++.kpm"; \
-		exit 1; \
-	fi
-	echo "✅ 构建成功！产物清单："; \
-	echo "  - 源码：HMA++.c"; \
-	echo "  - 编译产物：HMA++.o、HMA_Next.ko"; \
-	echo "  - KPM 模块：HMA++.kpm"; \
-	echo "  - 产物路径：$(pwd)/HMA++.kpm"
+	$(MAKE) -C $(KERNELDIR) M=$(PWD) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) clean
+	rm -f *.mod.c *.mod.o *.o *.ko .*.cmd Module.symvers modules.order .tmp_versions
