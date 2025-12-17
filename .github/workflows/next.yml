@@ -1,4 +1,4 @@
-name: HMA++ KPM Build (KernelPatch Toolchain)
+name: HMA++ KPM Build (KernelPatch Official)
 on:
   workflow_dispatch:
     inputs:
@@ -27,56 +27,87 @@ jobs:
           sudo apt clean
           chmod -R 777 $(pwd)
 
-      - name: 克隆 KernelPatch 构建工具
+      - name: 克隆 KernelPatch 官方工具
         run: |
-          # 克隆官方 KPM 构建工具
           git clone --depth 1 https://github.com/bmax121/KernelPatch.git ./KernelPatch
+          # 验证核心构建文件是否存在（kpm.mk 是关键）
+          [ ! -f "./KernelPatch/kpm/kpm.mk" ] && { echo "❌ KernelPatch 核心文件缺失！"; exit 1; }
           chmod -R 777 ./KernelPatch
           echo "✅ KernelPatch 工具克隆成功！"
 
-      - name: 配置 KPM 构建环境（自动处理内核依赖）
+      - name: 手动下载 Android NDK r25c（工具依赖，无自动下载脚本）
         run: |
-          # 进入工具目录，配置环境
-          cd ./KernelPatch
-          # 下载对应架构的 NDK 工具链（工具自动适配）
-          ./tools/download_ndk.sh ${{ github.event.inputs.kernel_arch }}
-          # 生成 KPM 构建配置（自动关联内核头文件和工具链）
-          ./tools/gen_kpm_config.sh ${{ github.event.inputs.kernel_arch }} ../
-          cd ..
-          echo "✅ KPM 构建环境配置完成！"
+          mkdir -p ./ndk
+          # 下载兼容的 NDK 版本（KernelPatch 推荐 r25c）
+          wget -q https://dl.google.com/android/repository/android-ndk-r25c-linux.zip -O ndk.zip
+          unzip -q -o ndk.zip -d ./ndk
+          NDK_ROOT=$(pwd)/ndk/android-ndk-r25c
+          # 验证 NDK 工具链存在
+          [ ! -d "$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64" ] && { echo "❌ NDK 下载失败！"; exit 1; }
+          echo "NDK_ROOT=$NDK_ROOT" >> $GITHUB_ENV
+          chmod -R 777 ./ndk
+          echo "✅ NDK 准备成功！路径：$NDK_ROOT"
 
-      - name: 补充 HMA++ 模块配置（适配 KernelPatch）
+      - name: 配置 KernelPatch 构建环境（适配官方规则）
         run: |
-          # 创建 KernelPatch 兼容的 Makefile（工具自动识别）
+          # 1. 复制 KernelPatch 核心构建文件到项目根目录（工具要求）
+          cp -r ./KernelPatch/kpm ./kpm
+          # 2. 生成工具配置文件（指定 NDK 路径，适配架构）
+          ARCH=${{ github.event.inputs.kernel_arch }}
+          cat > ./kpm_config.mk << EOF
+          # KernelPatch 配置文件（官方规范）
+          NDK_ROOT := ${{ env.NDK_ROOT }}
+          ARCH := $ARCH
+          # 自动匹配编译器（arm64=aarch64，arm=armv7a）
+          ifeq (\$(ARCH), arm64)
+            TARGET := aarch64-linux-android
+            CC := \$(NDK_ROOT)/toolchains/llvm/prebuilt/linux-x86_64/bin/\$(TARGET)24-clang
+          else
+            TARGET := armv7a-linux-androideabi
+            CC := \$(NDK_ROOT)/toolchains/llvm/prebuilt/linux-x86_64/bin/\$(TARGET)24-clang
+          endif
+          LD := \$(NDK_ROOT)/toolchains/llvm/prebuilt/linux-x86_64/bin/ld.lld
+          OBJCOPY := \$(NDK_ROOT)/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-objcopy
+          NM := \$(NDK_ROOT)/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm
+          EXTRA_CFLAGS := -Wall -O2 -fPIC -w -DKERNEL_5_15 -fno-pie -nostdinc
+          EOF
+          chmod 777 ./kpm_config.mk ./kpm
+          echo "✅ KernelPatch 环境配置完成！"
+
+      - name: 编写兼容 KernelPatch 的 Makefile
+        run: |
+          # 严格遵循 KernelPatch 官方构建规则
           cat > ./Makefile << EOF
-          # KernelPatch KPM 构建规则（无需手动配置内核路径）
-          include ./KernelPatch/kpm.mk
+          # 包含 KernelPatch 核心构建逻辑（官方路径）
+          include ./kpm/kpm.mk
           
-          # 模块信息
+          # 模块信息（工具要求的必填项）
           MODULE_NAME := HMA++
           MODULE_AUTHOR := NightFallsLikeRain
           MODULE_DESCRIPTION := "HMA++ Next: 基于白名单的应用文件操作拦截 KPM 模块"
-          MODULE_LICENSE := GPL-3.0
+          MODULE_LICENSE := GPL-2.0
+          MODULE_VERSION := 1.0.0
           
-          # 源码文件
+          # 源码文件（项目核心源码）
           SRC_FILES := HMA++.c
           
-          # 编译选项（工具自动注入内核头文件路径）
-          EXTRA_CFLAGS += -Wall -O2 -fPIC -w -DKERNEL_5_15 -fno-pie
+          # 附加编译选项（继承 kpm_config.mk 配置）
+          EXTRA_CFLAGS += \$(shell cat ./kpm_config.mk | grep EXTRA_CFLAGS | cut -d '=' -f 2-)
           EOF
           
-          # 确保 HMA++.c 存在（用户需自行保证源码在根目录）
-          [ ! -f "./HMA++.c" ] && { echo "❌ 未找到 HMA++.c 源码文件！"; exit 1; }
+          # 验证源码文件存在
+          [ ! -f "./HMA++.c" ] && { echo "❌ 请将 HMA++.c 源码放在项目根目录！"; exit 1; }
           chmod 777 ./Makefile ./HMA++.c
-          echo "✅ 模块配置完成！"
+          echo "✅ Makefile 配置完成！"
 
-      - name: 编译 HMA++ KPM 模块（KernelPatch 自动构建）
+      - name: 编译 HMA++ KPM 模块（KernelPatch 官方流程）
         run: |
-          # 直接调用 make，KernelPatch 自动处理所有依赖
+          # 直接调用 make，工具自动处理内核依赖、头文件、工具链
           make -j2 V=1 || { echo "❌ 模块编译失败！"; exit 1; }
           
           # 验证模块生成
-          if [ -f "./HMA++.ko" ]; then
+          if [ -f "./\$(MODULE_NAME).ko" ]; then
+            mv ./\$(MODULE_NAME).ko ./HMA++.ko  # 统一模块名称
             echo "🎉 HMA++ KPM 模块编译成功！"
             ls -la ./HMA++.ko
             file ./HMA++.ko
@@ -93,5 +124,6 @@ jobs:
           path: |
             HMA++.ko
             Makefile
+            kpm_config.mk
           retention-days: 90
         if: success()
