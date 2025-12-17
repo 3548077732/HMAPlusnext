@@ -1,33 +1,63 @@
-#include <compiler.h>
-#include <kpmodule.h>
+#include <linux/compiler.h>
+#include <linux/syscalls.h>
 #include <linux/printk.h>
-#include <uapi/asm-generic/unistd.h>
+#include <linux/unistd.h>
 #include <linux/uaccess.h>
-#include <syscall.h>
 #include <linux/string.h>
-#include <kputils.h>
 #include <linux/fs.h>
 #include <linux/errno.h>
-#include <uapi/linux/limits.h>
+#include <linux/limits.h>
 #include <linux/kernel.h>
+#include <kpm/kpm.h>  // 适配5.15+内核KPM框架标准头文件
 
-// 模块元信息
+// ====================== 内核5.15+适配定义 ======================
+// 1. 系统调用号（Android 13-5.15 arm64 标准号，避免头文件依赖冲突）
+#define __NR_mkdirat     257
+#define __NR_chdir       80
+#define __NR_rmdir       25
+#define __NR_unlinkat    353
+#define __NR_openat      56
+#define __NR_renameat    382
+
+// 2. KPM Hook参数结构体（适配5.15+内核KPM框架，确保成员对齐）
+typedef struct {
+    void *args[1];  // 1个参数的syscall
+    int skip_origin; // 跳过原始系统调用标记
+    long ret;        // 自定义返回值
+} hook_fargs1_t;
+
+typedef struct {
+    void *args[4];  // 4个参数的syscall
+    int skip_origin;
+    long ret;
+} hook_fargs4_t;
+
+typedef struct {
+    void *args[5];  // 5个参数的syscall
+    int skip_origin;
+    long ret;
+} hook_fargs5_t;
+
+// 3. 兼容5.15+内核的参数获取宏（替代旧版syscall_argn）
+#define syscall_argn(fargs, n)  ((fargs)->args[n])
+
+// ====================== 模块元信息（符合KPM 5.15+规范） ======================
 KPM_NAME("HMA++ Next");
 KPM_VERSION("1.0.8");
 KPM_LICENSE("GPLv3");
 KPM_AUTHOR("NightFallsLikeRain");
 KPM_DESCRIPTION("全应用风险+广告拦截（含微信/QQ/银行/系统软件白名单）");
 
-// 核心宏定义（移除路径限制，适配所有应用）
+// ====================== 核心配置（保持原始功能不变） ======================
 #define MAX_PACKAGE_LEN 576
 #define ARG_SEPARATOR ','
 #define PATH_SEPARATOR '/'
 
-// 全局开关（双开关设计，保持极简）
+// 全局开关
 static bool hma_running = true;        // 总开关
 static bool hma_ad_enabled = true;     // 广告拦截独立开关
 
-// 核心白名单（QQ/微信/系统软件/常用银行，无冗余）
+// 核心白名单（修复语法错误：补充缺失逗号）
 static const char *whitelist[] = {
     // 微信/QQ 核心应用
     "com.tencent.mm",          // 微信
@@ -62,15 +92,15 @@ static const char *whitelist[] = {
     "com.oppo.launcher",       // OPPO桌面
     "com.vivo.launcher",       // VIVO桌面
     "com.samsung.android.launcher", // 三星桌面
-    "com.meizu.flyme.launcher" // 魅族桌面
-    "me.bmax.apatch"
+    "com.meizu.flyme.launcher", // 魅族桌面
+    "me.bmax.apatch",
     "com.larus.nova",
     "com.miui.home",
     "com.sukisu.ultra"
 };
 #define WHITELIST_SIZE (sizeof(whitelist)/sizeof(whitelist[0]))
 
-// 1.风险拦截黑名单（精简高效）
+// 风险拦截黑名单
 static const char *deny_list[] = {
     "com.silverlab.app.deviceidchanger.free", "me.bingyue.IceCore",
     "com.modify.installer", "o.dyoo", "com.zhufucdev.motion_emulator",
@@ -125,7 +155,7 @@ static const char *deny_folder_list[] = {
 };
 #define DENY_FOLDER_SIZE (sizeof(deny_folder_list)/sizeof(deny_folder_list[0]))
 
-// 2.广告拦截黑名单（全路径关键词匹配）
+// 广告拦截黑名单（全路径关键词匹配）
 static const char *ad_file_keywords[] = {
     "ad_", "_ad.", "ads_", "_ads.", "advertise", "adcache", "adimg", "advideo",
     "adbanner", "adpopup", "adpush", "adconfig", "adlog", "adstat", "adtrack",
@@ -133,28 +163,28 @@ static const char *ad_file_keywords[] = {
 };
 #define AD_FILE_KEYWORD_SIZE (sizeof(ad_file_keywords)/sizeof(ad_file_keywords[0]))
 
-// 核心工具函数（极简无冗余）
+// ====================== 核心工具函数（5.15+内核兼容调整） ======================
 // 1. 白名单校验（优先放行核心应用）
 static int is_whitelisted(const char *path) {
     if (!path || *path != PATH_SEPARATOR) return 0;
 
-    // 提取包名（适配 /data/data/包名/... 或 /storage/emulated/0/Android/data/包名/... 路径）
     const char *data_prefix = "/data/data/";
     const char *android_data_prefix = "/storage/emulated/0/Android/data/";
     const char *pkg_start = NULL;
 
+    // 5.15+内核strstr兼容，无需调整
     if (strstr(path, data_prefix)) {
         pkg_start = path + strlen(data_prefix);
     } else if (strstr(path, android_data_prefix)) {
         pkg_start = path + strlen(android_data_prefix);
     } else {
-        // 系统路径直接放行（系统软件白名单）
+        // 系统路径直接放行
         return (strstr(path, "/system/") || strstr(path, "/vendor/") || strstr(path, "/oem/")) ? 1 : 0;
     }
 
-    // 提取包名字符串
     char pkg_name[MAX_PACKAGE_LEN] = {0};
     size_t i = 0;
+    // 避免越界（5.15+内核严格内存检查）
     while (pkg_start[i] && pkg_start[i] != PATH_SEPARATOR && i < MAX_PACKAGE_LEN - 1) {
         pkg_name[i] = pkg_start[i];
         i++;
@@ -174,20 +204,14 @@ static int is_whitelisted(const char *path) {
 static int is_blocked_path(const char *path) {
     if (!path || *path != PATH_SEPARATOR) return 0;
 
-    // 提取包名或文件夹名
     char target_buf[MAX_PACKAGE_LEN] = {0};
     const char *pkg_start = NULL;
 
-    // 匹配 /data/data/包名/... 路径
     if (strstr(path, "/data/data/")) {
         pkg_start = path + strlen("/data/data/");
-    }
-    // 匹配 /storage/emulated/0/Android/data/包名/... 路径
-    else if (strstr(path, "/storage/emulated/0/Android/data/")) {
+    } else if (strstr(path, "/storage/emulated/0/Android/data/")) {
         pkg_start = path + strlen("/storage/emulated/0/Android/data/");
-    }
-    // 匹配风险文件夹（直接匹配路径中的文件夹名）
-    else {
+    } else {
         const char *last_slash = strrchr(path, PATH_SEPARATOR);
         if (last_slash && *(last_slash + 1)) {
             pkg_start = last_slash + 1;
@@ -196,7 +220,6 @@ static int is_blocked_path(const char *path) {
         }
     }
 
-    // 提取目标字符串
     size_t i = 0;
     while (pkg_start[i] && pkg_start[i] != PATH_SEPARATOR && i < MAX_PACKAGE_LEN - 1) {
         target_buf[i] = pkg_start[i];
@@ -224,6 +247,7 @@ static int is_ad_blocked(const char *path) {
     if (!hma_ad_enabled || !path) return 0;
 
     char lower_path[PATH_MAX];
+    // 5.15+内核strncpy安全处理
     strncpy(lower_path, path, PATH_MAX - 1);
     lower_path[PATH_MAX - 1] = '\0';
 
@@ -243,26 +267,29 @@ static int is_ad_blocked(const char *path) {
     return 0;
 }
 
-// 核心拦截钩子（全应用适配，保持极简）
+// ====================== 核心拦截钩子（5.15+内核适配） ======================
 static void before_mkdirat(hook_fargs4_t *args, void *udata) {
     if (!hma_running) return;
     char path[PATH_MAX];
-    long len = compat_strncpy_from_user(path, (void *)syscall_argn(args, 1), PATH_MAX - 1);
+    // 替换compat_strncpy_from_user为5.15+内核原生函数（arm64 64位环境）
+    long len = strncpy_from_user(path, (const char __user *)syscall_argn(args, 1), PATH_MAX - 1);
     if (len <= 0 || is_whitelisted(path)) return;
     path[len] = '\0';
+
     if (is_blocked_path(path) || is_ad_blocked(path)) {
         pr_warn("[HMA++] mkdirat deny: %s\n", path);
-        args->skip_origin = 1;
-        args->ret = -EACCES;
+        args->skip_origin = 1;  // 跳过原始系统调用
+        args->ret = -EACCES;    // 权限拒绝返回值
     }
 }
 
 static void before_chdir(hook_fargs1_t *args, void *udata) {
     if (!hma_running) return;
     char path[PATH_MAX];
-    long len = compat_strncpy_from_user(path, (void *)syscall_argn(args, 0), PATH_MAX - 1);
+    long len = strncpy_from_user(path, (const char __user *)syscall_argn(args, 0), PATH_MAX - 1);
     if (len <= 0 || is_whitelisted(path)) return;
     path[len] = '\0';
+
     if (is_blocked_path(path) || is_ad_blocked(path)) {
         pr_warn("[HMA++] chdir deny: %s\n", path);
         args->skip_origin = 1;
@@ -270,57 +297,53 @@ static void before_chdir(hook_fargs1_t *args, void *udata) {
     }
 }
 
-#if defined(__NR_rmdir)
 static void before_rmdir(hook_fargs1_t *args, void *udata) {
     if (!hma_running) return;
     char path[PATH_MAX];
-    long len = compat_strncpy_from_user(path, (void *)syscall_argn(args, 0), PATH_MAX - 1);
+    long len = strncpy_from_user(path, (const char __user *)syscall_argn(args, 0), PATH_MAX - 1);
     if (len <= 0 || is_whitelisted(path)) return;
     path[len] = '\0';
+
     if (is_blocked_path(path) || is_ad_blocked(path)) {
         pr_warn("[HMA++] rmdir deny: %s\n", path);
         args->skip_origin = 1;
         args->ret = -ENOENT;
     }
 }
-#endif
 
-#if defined(__NR_unlinkat)
 static void before_unlinkat(hook_fargs4_t *args, void *udata) {
     if (!hma_running) return;
     char path[PATH_MAX];
-    long len = compat_strncpy_from_user(path, (void *)syscall_argn(args, 1), PATH_MAX - 1);
+    long len = strncpy_from_user(path, (const char __user *)syscall_argn(args, 1), PATH_MAX - 1);
     if (len <= 0 || is_whitelisted(path)) return;
     path[len] = '\0';
+
     if (is_blocked_path(path) || is_ad_blocked(path)) {
         pr_warn("[HMA++] unlinkat deny: %s\n", path);
         args->skip_origin = 1;
         args->ret = -ENOENT;
     }
 }
-#endif
 
-#ifdef __NR_openat
 static void before_openat(hook_fargs5_t *args, void *udata) {
     if (!hma_running) return;
     char path[PATH_MAX];
-    long len = compat_strncpy_from_user(path, (void *)syscall_argn(args, 1), PATH_MAX - 1);
+    long len = strncpy_from_user(path, (const char __user *)syscall_argn(args, 1), PATH_MAX - 1);
     if (len <= 0 || is_whitelisted(path)) return;
     path[len] = '\0';
+
     if (is_blocked_path(path) || is_ad_blocked(path)) {
         pr_warn("[HMA++] openat deny: %s\n", path);
         args->skip_origin = 1;
         args->ret = -ENOENT;
     }
 }
-#endif
 
-#ifdef __NR_renameat
 static void before_renameat(hook_fargs4_t *args, void *udata) {
     if (!hma_running) return;
     char old_path[PATH_MAX], new_path[PATH_MAX];
-    long len_old = compat_strncpy_from_user(old_path, (void *)syscall_argn(args, 1), PATH_MAX - 1);
-    long len_new = compat_strncpy_from_user(new_path, (void *)syscall_argn(args, 3), PATH_MAX - 1);
+    long len_old = strncpy_from_user(old_path, (const char __user *)syscall_argn(args, 1), PATH_MAX - 1);
+    long len_new = strncpy_from_user(new_path, (const char __user *)syscall_argn(args, 3), PATH_MAX - 1);
     if (len_old <= 0 || len_new <= 0) return;
     old_path[len_old] = '\0';
     new_path[len_new] = '\0';
@@ -334,30 +357,30 @@ static void before_renameat(hook_fargs4_t *args, void *udata) {
         args->ret = -ENOENT;
     }
 }
-#endif
 
-// 模块生命周期（极简无冗余）
+// ====================== 模块生命周期（5.15+内核KPM规范） ======================
 static long mkdir_hook_init(const char *args, const char *event, void *__user reserved) {
     hook_err_t err;
-    pr_info("[HMA++] init start (全应用拦截+核心白名单)\n");
+    pr_info("[HMA++] init start (全应用拦截+核心白名单，适配Android 13-5.15+)\n");
 
-    // 挂钩核心文件操作syscall
+    // 挂钩核心文件操作syscall（5.15+内核KPM接口兼容）
     err = hook_syscalln(__NR_mkdirat, 3, before_mkdirat, NULL, NULL);
     if (err) { pr_err("[HMA++] hook mkdirat err: %d\n", err); return -EINVAL; }
+    
     err = hook_syscalln(__NR_chdir, 1, before_chdir, NULL, NULL);
     if (err) { pr_err("[HMA++] hook chdir err: %d\n", err); return -EINVAL; }
-#if defined(__NR_rmdir)
-    hook_syscalln(__NR_rmdir, 1, before_rmdir, NULL, NULL);
-#endif
-#if defined(__NR_unlinkat)
-    hook_syscalln(__NR_unlinkat, 4, before_unlinkat, NULL, NULL);
-#endif
-#ifdef __NR_openat
-    hook_syscalln(__NR_openat, 5, before_openat, NULL, NULL);
-#endif
-#ifdef __NR_renameat
-    hook_syscalln(__NR_renameat, 4, before_renameat, NULL, NULL);
-#endif
+    
+    err = hook_syscalln(__NR_rmdir, 1, before_rmdir, NULL, NULL);
+    if (err) { pr_err("[HMA++] hook rmdir err: %d\n", err); return -EINVAL; }
+    
+    err = hook_syscalln(__NR_unlinkat, 4, before_unlinkat, NULL, NULL);
+    if (err) { pr_err("[HMA++] hook unlinkat err: %d\n", err); return -EINVAL; }
+    
+    err = hook_syscalln(__NR_openat, 5, before_openat, NULL, NULL);
+    if (err) { pr_err("[HMA++] hook openat err: %d\n", err); return -EINVAL; }
+    
+    err = hook_syscalln(__NR_renameat, 4, before_renameat, NULL, NULL);
+    if (err) { pr_err("[HMA++] hook renameat err: %d\n", err); return -EINVAL; }
 
     pr_info("[HMA++] init success (global: %d, ad: %d)\n", hma_running, hma_ad_enabled);
     return 0;
@@ -386,38 +409,31 @@ static long hma_control0(const char *args, char *__user out_msg, int outlen) {
 
 out_copy:
     if (outlen >= strlen(msg) + 1) {
+        // 5.15+内核compat_copy_to_user兼容，无需调整
         compat_copy_to_user(out_msg, msg, strlen(msg) + 1);
     }
     return 0;
 }
 
-// 预留控制接口（极简实现）
+// 预留控制接口
 static long hma_control1(void *a1, void *a2, void *a3) {
     return 0;
 }
 
-// 模块退出（极简解钩）
+// 模块退出（解钩所有syscall）
 static long mkdir_hook_exit(void *__user reserved) {
     pr_info("[HMA++] exit start\n");
     unhook_syscalln(__NR_mkdirat, before_mkdirat, NULL);
     unhook_syscalln(__NR_chdir, before_chdir, NULL);
-#if defined(__NR_rmdir)
     unhook_syscalln(__NR_rmdir, before_rmdir, NULL);
-#endif
-#if defined(__NR_unlinkat)
     unhook_syscalln(__NR_unlinkat, before_unlinkat, NULL);
-#endif
-#ifdef __NR_openat
     unhook_syscalln(__NR_openat, before_openat, NULL);
-#endif
-#ifdef __NR_renameat
     unhook_syscalln(__NR_renameat, before_renameat, NULL);
-#endif
     pr_info("[HMA++] exit success\n");
     return 0;
 }
 
-// 模块注册（符合KPM规范）
+// ====================== 模块注册（符合5.15+内核KPM框架规范） ======================
 KPM_INIT(mkdir_hook_init);
 KPM_CTL0(hma_control0);
 KPM_CTL1(hma_control1);
