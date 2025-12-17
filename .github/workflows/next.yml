@@ -32,12 +32,12 @@ jobs:
           # 替换为 LineageOS 预编译头文件（支持 5.15+ 内核，稳定可靠）
           if [ "${{ github.event.inputs.kernel_arch }}" = "arm64" ]; then
             # ARM64 头文件（适配 Android 5.15+ 内核）
-            wget https://dl.google.com/android/repository/android-ndk-r25c-linux-x86_64.zip -O ndk.zip
+            wget https://dl.google.com/android/repository/android-ndk-r25c-linux.zip -O ndk.zip
             unzip -q ndk.zip android-ndk-r25c/sysroot/usr/include/ -d ./
             mv ./android-ndk-r25c/sysroot/usr/include ./kernel-headers/
           else
             # ARM32 头文件
-            wget https://dl.google.com/android/repository/android-ndk-r25c-linux-x86_64.zip -O ndk.zip
+            wget https://dl.google.com/android/repository/android-ndk-r25c-linux.zip -O ndk.zip
             unzip -q ndk.zip android-ndk-r25c/sysroot/usr/include/ -d ./
             mv ./android-ndk-r25c/sysroot/usr/include ./kernel-headers/
           fi
