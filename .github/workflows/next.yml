@@ -20,60 +20,68 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Install All Dependencies（5.15 内核必需）
+      - name: Install All Dependencies（内核+NDK 必需）
         run: |
           sudo apt update -y
-          sudo apt install -y build-essential git wget unzip gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf flex bison bc libssl-dev libelf-dev dwarves
+          sudo apt install -y build-essential git wget unzip flex bison bc libssl-dev libelf-dev dwarves
           sudo apt clean
           chmod -R 777 $(pwd)
+
+      - name: 下载 Android NDK r25c（获取 Android 交叉编译器）
+        run: |
+          mkdir -p ./ndk
+          # 下载 NDK r25c（适配 Android 内核编译，包含 aarch64-linux-android-gcc）
+          wget -q https://dl.google.com/android/repository/android-ndk-r25c-linux.zip -O ndk.zip
+          unzip -q -o ndk.zip -d ./ndk
+          # 验证 NDK 工具链存在
+          NDK_TOOLCHAIN=$(pwd)/ndk/android-ndk-r25c/toolchains
+          if [ ! -d "$NDK_TOOLCHAIN/aarch64-linux-android-4.9" ] || [ ! -d "$NDK_TOOLCHAIN/arm-linux-androideabi-4.9" ]; then
+            echo "❌ NDK 工具链缺失！"
+            exit 1
+          fi
+          chmod -R 777 ./ndk
+          echo "✅ NDK r25c 下载并解压成功！"
 
       - name: 克隆谷歌官方内核（android13-5.15 分支）
         run: |
           mkdir -p ./kernel-src ./kernel-headers
-          # 谷歌官方仓库 + android13-5.15 分支（已验证存在）
           git clone --depth 1 -b android13-5.15 https://android.googlesource.com/kernel/common.git ./kernel-src
           
           # 验证克隆完整性
           if [ ! -d "./kernel-src/include" ] || [ ! -f "./kernel-src/Makefile" ] || [ ! -d "./kernel-src/arch" ]; then
-            echo "❌ 谷歌内核克隆失败，核心文件缺失！"
+            echo "❌ 谷歌内核克隆失败！"
             ls -la ./kernel-src
             exit 1
           fi
           
-          # 修复：只复制存在的目录，generated 目录后续配置后自动生成，无需提前复制
+          # 复制基础头文件
           ARCH=${{ github.event.inputs.kernel_arch }}
           cp -r ./kernel-src/include ./kernel-headers/
-          if [ "$ARCH" = "arm64" ]; then
-            # 只复制存在的 include 目录，跳过 generated（未生成）
-            if [ -d "./kernel-src/arch/arm64/include" ]; then
-              cp -r ./kernel-src/arch/arm64/include ./kernel-headers/arch-include
-            else
-              echo "⚠️ arm64 include 目录不存在，跳过复制"
-            fi
-          else
-            if [ -d "./kernel-src/arch/arm/include" ]; then
-              cp -r ./kernel-src/arch/arm/include ./kernel-headers/arch-include
-            else
-              echo "⚠️ arm include 目录不存在，跳过复制"
-            fi
+          if [ "$ARCH" = "arm64" ] && [ -d "./kernel-src/arch/arm64/include" ]; then
+            cp -r ./kernel-src/arch/arm64/include ./kernel-headers/arch-include
+          elif [ "$ARCH" = "arm" ] && [ -d "./kernel-src/arch/arm/include" ]; then
+            cp -r ./kernel-src/arch/arm/include ./kernel-headers/arch-include
           fi
           
           chmod -R 777 ./kernel-src ./kernel-headers
-          echo "✅ 谷歌官方 kernel/common (android13-5.15) 克隆成功！"
+          echo "✅ 谷歌内核克隆成功！"
 
-      - name: 配置内核（生成 generated 目录+适配 KPM）
+      - name: 配置内核（使用 NDK 交叉编译器）
         run: |
           ARCH=${{ github.event.inputs.kernel_arch }}
+          NDK_TOOLCHAIN=$(pwd)/ndk/android-ndk-r25c/toolchains
           cd ./kernel-src
-          # 生成默认配置（此步骤会自动创建 arch/*/include/generated 目录）
+          
+          # 配置交叉编译器路径（使用 NDK 工具链，而非系统编译器）
           if [ "$ARCH" = "arm64" ]; then
-            make ARCH=arm64 CROSS_COMPILE=aarch64-linux-android- defconfig
-            CROSS_COMPILE="aarch64-linux-android-"
+            export CROSS_COMPILE=$NDK_TOOLCHAIN/aarch64-linux-android-4.9/prebuilt/linux-x86_64/bin/aarch64-linux-android-
+            make ARCH=arm64 CROSS_COMPILE=$CROSS_COMPILE defconfig
           else
-            make ARCH=arm CROSS_COMPILE=arm-linux-androideabi- defconfig
-            CROSS_COMPILE="arm-linux-androideabi-"
+            export CROSS_COMPILE=$NDK_TOOLCHAIN/arm-linux-androideabi-4.9/prebuilt/linux-x86_64/bin/arm-linux-androideabi-
+            make ARCH=arm CROSS_COMPILE=$CROSS_COMPILE defconfig
           fi
-          # 开启模块编译必需配置
+          
+          # 开启模块支持配置
           sed -i 's/# CONFIG_MODULES is not set/CONFIG_MODULES=y/' .config
           sed -i 's/# CONFIG_MODULE_UNLOAD is not set/CONFIG_MODULE_UNLOAD=y/' .config
           sed -i 's/# CONFIG_MODULE_FORCE_LOAD is not set/CONFIG_MODULE_FORCE_LOAD=y/' .config
@@ -82,7 +90,7 @@ jobs:
           sed -i 's/# CONFIG_MODULE_SIG is not set/CONFIG_MODULE_SIG=n/' .config
           cd ..
 
-      - name: 补充 KPM 核心头文件（Apatch 兼容）
+      - name: 补充 KPM 核心头文件
         run: |
           mkdir -p ./kernel-headers/linux
           chmod 777 ./kernel-headers/linux
@@ -113,23 +121,25 @@ jobs:
           EOF
           chmod 777 ./kernel-headers/linux/kpm.h
 
-      - name: 编译 HMA++ KPM 模块（最终构建）
+      - name: 编译 HMA++ KPM 模块（使用 NDK 工具链）
         run: |
           export KERNELDIR=$(pwd)/kernel-src
           export ARCH=${{ github.event.inputs.kernel_arch }}
-          # 交叉编译器配置
+          NDK_TOOLCHAIN=$(pwd)/ndk/android-ndk-r25c/toolchains
+          
+          # 配置交叉编译器+头文件路径
           if [ "$ARCH" = "arm64" ]; then
-            export CROSS_COMPILE=aarch64-linux-android-
-            # 补充 generated 目录路径（配置后已生成）
-            export EXTRA_CFLAGS="-I$(pwd)/kernel-headers -I$(pwd)/kernel-headers/linux -I$(pwd)/kernel-headers/arch-include -I$(pwd)/kernel-src/arch/arm64/include/generated -Wall -Wextra -O2 -fPIC -w -DKERNEL_5_15 -fno-pie"
+            export CROSS_COMPILE=$NDK_TOOLCHAIN/aarch64-linux-android-4.9/prebuilt/linux-x86_64/bin/aarch64-linux-android-
+            export EXTRA_CFLAGS="-I$(pwd)/kernel-headers -I$(pwd)/kernel-headers/linux -I$(pwd)/kernel-headers/arch-include -I$KERNELDIR/arch/arm64/include/generated -Wall -Wextra -O2 -fPIC -w -DKERNEL_5_15 -fno-pie"
           else
-            export CROSS_COMPILE=arm-linux-androideabi-
-            export EXTRA_CFLAGS="-I$(pwd)/kernel-headers -I$(pwd)/kernel-headers/linux -I$(pwd)/kernel-headers/arch-include -I$(pwd)/kernel-src/arch/arm/include/generated -Wall -Wextra -O2 -fPIC -w -DKERNEL_5_15 -fno-pie"
+            export CROSS_COMPILE=$NDK_TOOLCHAIN/arm-linux-androideabi-4.9/prebuilt/linux-x86_64/bin/arm-linux-androideabi-
+            export EXTRA_CFLAGS="-I$(pwd)/kernel-headers -I$(pwd)/kernel-headers/linux -I$(pwd)/kernel-headers/arch-include -I$KERNELDIR/arch/arm/include/generated -Wall -Wextra -O2 -fPIC -w -DKERNEL_5_15 -fno-pie"
           fi
+          
           chmod 777 ./Makefile
           make clean || true
-          # 限制并发数为 2，避免资源耗尽
           make -j2 V=1 || { echo "❌ 编译失败！"; exit 1; }
+          
           # 验证模块生成
           if [ -f "./HMA++.ko" ]; then
             echo "✅ HMA++ KPM 模块编译成功！"
