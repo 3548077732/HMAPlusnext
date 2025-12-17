@@ -27,31 +27,36 @@ jobs:
           sudo apt clean
           chmod -R 777 $(pwd)
 
-      - name: 下载完整 Android 5.15 内核源码（带编译规则）
+      - name: 下载完整 Android 5.15 内核源码（修复分支+可靠仓库）
         run: |
           mkdir -p ./kernel-src ./kernel-headers
-          # 选择适配 Apatch 的完整内核源码（5.15+，带 modules/clean 规则）
           ARCH=${{ github.event.inputs.kernel_arch }}
+          # 替换为存在 5.15 分支的可靠仓库（LineageOS 官方稳定分支）
           if [ "$ARCH" = "arm64" ]; then
-            # ARM64 内核源码（LineageOS 5.15 稳定版，支持 Apatch）
-            git clone --depth 1 -b lineage-19.1-5.15 https://github.com/LineageOS/android_kernel_google_redbull.git ./kernel-src
-            # 复制头文件到 kernel-headers（兼容之前的路径配置）
-            cp -r ./kernel-src/include ./kernel-headers/
+            # ARM64：使用 Google Pixel 系列 5.15 内核（分支存在且稳定）
+            git clone --depth 1 -b lineage-20.0-5.15 https://github.com/LineageOS/android_kernel_google_gs201.git ./kernel-src
+          else
+            # ARM32：使用高通 MSM8917 5.15 内核（默认分支为 5.15 稳定版）
+            git clone --depth 1 https://github.com/LineageOS/android_kernel_qualcomm_msm8937.git ./kernel-src
+          fi
+          
+          # 复制头文件（确保路径正确）
+          cp -r ./kernel-src/include ./kernel-headers/
+          if [ "$ARCH" = "arm64" ]; then
             cp -r ./kernel-src/arch/arm64/include ./kernel-headers/arch-include
           else
-            # ARM32 内核源码（5.15 稳定版）
-            git clone --depth 1 -b lineage-19.1-5.15 https://github.com/LineageOS/android_kernel_qualcomm_msm8917.git ./kernel-src
-            cp -r ./kernel-src/include ./kernel-headers/
             cp -r ./kernel-src/arch/arm/include ./kernel-headers/arch-include
           fi
-          # 给内核源码加全局777权限
+          
+          # 全局权限赋值
           chmod -R 777 ./kernel-src ./kernel-headers
+          echo "内核源码克隆成功！"
 
       - name: 配置内核编译环境（生成 .config 和编译规则）
         run: |
           ARCH=${{ github.event.inputs.kernel_arch }}
           cd ./kernel-src
-          # 生成默认配置（适配对应架构）
+          # 生成对应架构的默认配置
           if [ "$ARCH" = "arm64" ]; then
             make ARCH=arm64 CROSS_COMPILE=aarch64-linux-android- defconfig
             CROSS_COMPILE="aarch64-linux-android-"
@@ -61,7 +66,6 @@ jobs:
           fi
           # 启用模块支持（必需）
           make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE menuconfig
-          # 强制开启模块加载支持（避免编译失败）
           sed -i 's/# CONFIG_MODULES is not set/CONFIG_MODULES=y/' .config
           sed -i 's/# CONFIG_MODULE_UNLOAD is not set/CONFIG_MODULE_UNLOAD=y/' .config
           sed -i 's/# CONFIG_MODULE_FORCE_LOAD is not set/CONFIG_MODULE_FORCE_LOAD=y/' .config
@@ -100,7 +104,6 @@ jobs:
 
       - name: Build HMA++ KPM Module（使用完整内核源码）
         run: |
-          # 关键：KERNELDIR 指向完整内核源码目录（而非仅头文件）
           export KERNELDIR=$(pwd)/kernel-src
           export ARCH=${{ github.event.inputs.kernel_arch }}
           if [ "$ARCH" = "arm64" ]; then
@@ -108,7 +111,6 @@ jobs:
           else
             export CROSS_COMPILE=arm-linux-androideabi-
           fi
-          # 头文件路径包含内核源码和补充的 kpm.h
           export EXTRA_CFLAGS="-I$(pwd)/kernel-headers -I$(pwd)/kernel-headers/linux -I$(pwd)/kernel-headers/arch-include -Wall -Wextra -O2 -fPIC -w"
           chmod 777 ./Makefile
           make clean || true
