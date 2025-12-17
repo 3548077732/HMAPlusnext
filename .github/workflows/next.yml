@@ -23,61 +23,52 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt update -y
-          sudo apt install -y build-essential git wget unzip gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf
+          sudo apt install -y build-essential git wget unzip gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf flex bison bc libssl-dev
           sudo apt clean
-          # 提前给工作目录加777，避免后续操作权限不足
           chmod -R 777 $(pwd)
 
-      - name: Download & Extract NDK r25c（动态路径+全程777）
+      - name: 下载完整 Android 5.15 内核源码（带编译规则）
         run: |
-          mkdir -p ./ndk ./kernel-headers
-          # 下载并强制解压（忽略权限错误）
-          wget -q https://dl.google.com/android/repository/android-ndk-r25c-linux.zip -O ndk.zip
-          unzip -q -o ndk.zip -d ./ndk  # -o 覆盖现有文件，避免解压冲突
-          
-          # 赋予NDK目录全程777权限（递归所有文件/子目录）
-          chmod -R 777 ./ndk
-          
-          # 动态查找 NDK 的 sysroot/usr/include 目录（关键修复！）
-          echo "=== 动态查找NDK include路径 ==="
-          INCLUDE_PATH=$(find ./ndk -path "*/sysroot/usr/include" -type d | head -n 1)
-          if [ -z "$INCLUDE_PATH" ]; then
-            echo "错误：未找到NDK include目录！"
-            find ./ndk -type d | grep -E "sysroot|usr"  # 输出目录结构用于调试
-            exit 1
-          fi
-          echo "找到include路径：$INCLUDE_PATH"
-          
-          # 复制头文件到 kernel-headers（带权限复制）
-          cp -r "$INCLUDE_PATH" ./kernel-headers/
-          echo "include 目录复制成功"
-          
-          # 动态查找 asm 头文件路径（适配不同架构）
+          mkdir -p ./kernel-src ./kernel-headers
+          # 选择适配 Apatch 的完整内核源码（5.15+，带 modules/clean 规则）
           ARCH=${{ github.event.inputs.kernel_arch }}
           if [ "$ARCH" = "arm64" ]; then
-            ASM_PATH=$(find ./ndk -path "*/aarch64-linux-android/asm" -type d | head -n 1)
+            # ARM64 内核源码（LineageOS 5.15 稳定版，支持 Apatch）
+            git clone --depth 1 -b lineage-19.1-5.15 https://github.com/LineageOS/android_kernel_google_redbull.git ./kernel-src
+            # 复制头文件到 kernel-headers（兼容之前的路径配置）
+            cp -r ./kernel-src/include ./kernel-headers/
+            cp -r ./kernel-src/arch/arm64/include ./kernel-headers/arch-include
           else
-            ASM_PATH=$(find ./ndk -path "*/arm-linux-androideabi/asm" -type d | head -n 1)
+            # ARM32 内核源码（5.15 稳定版）
+            git clone --depth 1 -b lineage-19.1-5.15 https://github.com/LineageOS/android_kernel_qualcomm_msm8917.git ./kernel-src
+            cp -r ./kernel-src/include ./kernel-headers/
+            cp -r ./kernel-src/arch/arm/include ./kernel-headers/arch-include
           fi
-          
-          # 复制 asm 头文件（不存在则跳过，避免报错）
-          if [ -n "$ASM_PATH" ]; then
-            cp -r "$ASM_PATH" ./kernel-headers/include/
-            echo "asm 头文件复制成功：$ASM_PATH"
-          else
-            echo "警告：未找到asm目录，跳过复制"
-            find ./ndk -type d | grep "linux-android"  # 调试输出相关目录
-          fi
-          
-          # 给 kernel-headers 加全局777
-          chmod -R 777 ./kernel-headers
-          rm -rf ndk.zip ./ndk  # 清理临时文件
+          # 给内核源码加全局777权限
+          chmod -R 777 ./kernel-src ./kernel-headers
 
-      - name: 补充 KPM 必需头文件（带权限）
+      - name: 配置内核编译环境（生成 .config 和编译规则）
+        run: |
+          ARCH=${{ github.event.inputs.kernel_arch }}
+          cd ./kernel-src
+          # 生成默认配置（适配对应架构）
+          if [ "$ARCH" = "arm64" ]; then
+            make ARCH=arm64 CROSS_COMPILE=aarch64-linux-android- defconfig
+          else
+            make ARCH=arm CROSS_COMPILE=arm-linux-androideabi- defconfig
+          fi
+          # 启用模块支持（必需）
+          make ARCH=$ARCH CROSS_COMPILE=${{ github.event.inputs.kernel_arch == 'arm64' ? 'aarch64-linux-android-' : 'arm-linux-androideabi-' }} menuconfig
+          # 强制开启模块加载支持（避免编译失败）
+          sed -i 's/# CONFIG_MODULES is not set/CONFIG_MODULES=y/' .config
+          sed -i 's/# CONFIG_MODULE_UNLOAD is not set/CONFIG_MODULE_UNLOAD=y/' .config
+          sed -i 's/# CONFIG_MODULE_FORCE_LOAD is not set/CONFIG_MODULE_FORCE_LOAD=y/' .config
+          cd ..
+
+      - name: 补充 KPM 必需头文件
         run: |
           mkdir -p ./kernel-headers/linux
           chmod 777 ./kernel-headers/linux
-          # 写入kpm.h并赋予权限
           cat > ./kernel-headers/linux/kpm.h << EOF
           #ifndef __KPM_H__
           #define __KPM_H__
@@ -105,24 +96,21 @@ jobs:
           EOF
           chmod 777 ./kernel-headers/linux/kpm.h
 
-      - name: Build HMA++ KPM Module（权限兼容+编译优化）
+      - name: Build HMA++ KPM Module（使用完整内核源码）
         run: |
-          export KERNELDIR=$(pwd)/kernel-headers
+          # 关键：KERNELDIR 指向完整内核源码目录（而非仅头文件）
+          export KERNELDIR=$(pwd)/kernel-src
           export ARCH=${{ github.event.inputs.kernel_arch }}
-          # 选择兼容的交叉编译器
           if [ "$ARCH" = "arm64" ]; then
             export CROSS_COMPILE=aarch64-linux-android-
           else
             export CROSS_COMPILE=arm-linux-androideabi-
           fi
-          # 强制头文件路径+权限兼容选项
-          export EXTRA_CFLAGS="-I$KERNELDIR/include -I$KERNELDIR/include/linux -I$KERNELDIR/include/asm -Wall -Wextra -O2 -fPIC -w"
-          # 确保Makefile可执行，清理旧文件
+          # 头文件路径包含内核源码和补充的 kpm.h
+          export EXTRA_CFLAGS="-I$(pwd)/kernel-headers -I$(pwd)/kernel-headers/linux -I$(pwd)/kernel-headers/arch-include -Wall -Wextra -O2 -fPIC -w"
           chmod 777 ./Makefile
-          make clean || true  # 忽略clean失败（无旧文件时）
-          # 编译（显示详细日志，便于调试）
+          make clean || true
           make -j$(nproc) V=1 || { echo "编译失败！"; exit 1; }
-          # 给生成的模块文件加777权限
           chmod 777 ./HMA++.ko
 
       - name: Upload Build Output
