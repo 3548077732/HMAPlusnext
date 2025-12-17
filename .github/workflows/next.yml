@@ -1,4 +1,4 @@
-name: Build
+name: Build2
 
 on:
   push:
@@ -125,7 +125,7 @@ jobs:
           echo "🔨 开始编译模块..."
           make V=1 || { echo "❌ 编译失败！"; exit 1; }
 
-      - name: 验证产物并上传
+      - name: 验证产物存在
         run: |
           if [ ! -f "./HMA++.kpm" ]; then
             echo "❌ 目标产物 HMA++.kpm 未生成！"
@@ -133,6 +133,8 @@ jobs:
             exit 1
           fi
           echo "✅ 产物验证成功！"
+
+      - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
           name: HMA++.kpm
