@@ -27,7 +27,7 @@ jobs:
           sudo apt clean
           chmod -R 777 $(pwd)
 
-      - name: 下载 Android NDK r25c（修正工具链前缀）
+      - name: 下载 Android NDK r25c（修正正则提取前缀）
         run: |
           mkdir -p ./ndk
           wget -q https://dl.google.com/android/repository/android-ndk-r25c-linux.zip -O ndk.zip
@@ -38,19 +38,22 @@ jobs:
           LLVM_PREBUILT=$(find $NDK_ROOT/toolchains/llvm/prebuilt -name "linux-x86_64" -type d | head -n 1)
           LLVM_BIN=$LLVM_PREBUILT/bin
           
-          # 核心修复：提取不带 API 版本的工具链前缀（如 aarch64-linux-android-）
+          # 核心修复：简化正则，避免“-”歧义，直接匹配架构前缀
           if [ "${{ github.event.inputs.kernel_arch }}" = "arm64" ]; then
-            # 匹配编译器并提取基础前缀（去掉 API 版本和 -clang）
+            # 匹配 arm64 编译器（aarch64-linux-androidXX-clang）
             ARM64_CC=$(ls $LLVM_BIN/aarch64-linux-android*-clang 2>/dev/null | sort -V | tail -n 1)
             [ -z "$ARM64_CC" ] && { echo "❌ arm64 编译器缺失！"; exit 1; }
-            CROSS_PREFIX=$(echo $ARM64_CC | sed -E 's/([aarch64-linux-android]-)[0-9]+-clang$/\1/')
+            # 提取前缀为 "aarch64-linux-android-"（去掉 XX-clang）
+            CROSS_PREFIX="aarch64-linux-android-"
           else
+            # 匹配 arm32 编译器（armv7a-linux-androideabiXX-clang）
             ARM32_CC=$(ls $LLVM_BIN/armv7a-linux-androideabi*-clang 2>/dev/null | sort -V | tail -n 1)
             [ -z "$ARM32_CC" ] && { echo "❌ arm32 编译器缺失！"; exit 1; }
-            CROSS_PREFIX=$(echo $ARM32_CC | sed -E 's/([armv7a-linux-androideabi]-)[0-9]+-clang$/\1/')
+            # 提取前缀为 "armv7a-linux-androideabi-"
+            CROSS_PREFIX="armv7a-linux-androideabi-"
           fi
           
-          # 保存关键环境变量（编译器+工具链前缀+LLVM 工具路径）
+          # 保存环境变量（编译器路径+无版本前缀+LLVM工具目录）
           echo "CC=$ARM64_CC" >> $GITHUB_ENV
           echo "CROSS_PREFIX=$CROSS_PREFIX" >> $GITHUB_ENV
           echo "LLVM_BIN=$LLVM_BIN" >> $GITHUB_ENV
@@ -76,7 +79,7 @@ jobs:
           chmod -R 777 ./kernel-src ./kernel-headers
           echo "✅ 内核源码准备成功！"
 
-      - name: 配置内核（禁用 VDSO+显式指定 LLVM 工具）
+      - name: 配置内核（禁用VDSO+显式LLVM工具）
         run: |
           ARCH=${{ github.event.inputs.kernel_arch }}
           CC=${{ env.CC }}
@@ -84,7 +87,7 @@ jobs:
           LLVM_BIN=${{ env.LLVM_BIN }}
           cd ./kernel-src
           
-          # 配置编译器+LLVM 工具（显式指定 objcopy/nm/objdump 为 LLVM 工具）
+          # 显式指定所有LLVM工具（避免查找失败）
           export CC=$CC
           export LD=$LLVM_BIN/ld.lld
           export CROSS_COMPILE=$CROSS_PREFIX
@@ -96,7 +99,7 @@ jobs:
           # 1. 生成默认配置
           make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE CC=$CC LD=$LD defconfig
           
-          # 2. 关键配置：禁用 VDSO（避免工具依赖）+ 启用模块支持
+          # 2. 关键配置（禁用VDSO+模块支持+LLVM兼容）
           sed -i 's/# CONFIG_MODULES is not set/CONFIG_MODULES=y/' .config
           sed -i 's/# CONFIG_MODULE_UNLOAD is not set/CONFIG_MODULE_UNLOAD=y/' .config
           sed -i 's/# CONFIG_MODULE_FORCE_LOAD is not set/CONFIG_MODULE_FORCE_LOAD=y/' .config
@@ -106,9 +109,9 @@ jobs:
           sed -i 's/# CONFIG_LLVM=y/CONFIG_LLVM=y/' .config
           sed -i 's/# CONFIG_LLVM_IAS=y/CONFIG_LLVM_IAS=y/' .config
           sed -i 's/CONFIG_STACKPROTECTOR=y/# CONFIG_STACKPROTECTOR is not set/' .config
-          sed -i 's/# CONFIG_VDSO is not set/CONFIG_VDSO=n/' .config  # 禁用 VDSO，避免工具缺失错误
+          sed -i 's/# CONFIG_VDSO is not set/CONFIG_VDSO=n/' .config  # 禁用VDSO，彻底规避工具依赖
           
-          # 3. 生成核心头文件+模块编译环境
+          # 3. 生成核心头文件+模块编译环境（必需步骤）
           make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE CC=$CC LD=$LD prepare -j2
           make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE CC=$CC LD=$LD modules_prepare -j2
           
@@ -157,7 +160,7 @@ jobs:
           export NM=${{ env.LLVM_BIN }}/llvm-nm
           export OBJDUMP=${{ env.LLVM_BIN }}/llvm-objdump
           
-          # 头文件路径+兼容选项
+          # 头文件路径+兼容编译选项
           if [ "$ARCH" = "arm64" ]; then
             export EXTRA_CFLAGS="-I$(pwd)/kernel-headers -I$(pwd)/kernel-headers/linux -I$(pwd)/kernel-headers/arch-include -I$KERNELDIR/arch/arm64/include/generated -Wall -Wextra -O2 -fPIC -w -DKERNEL_5_15 -fno-pie -nostdinc"
           else
@@ -166,13 +169,14 @@ jobs:
           
           chmod 777 ./Makefile
           make clean || true
-          # 编译模块（显式传递所有工具链参数）
+          # 编译模块（显式传递所有工具链参数，确保无遗漏）
           make -j2 V=1 CC=$CC LD=$LD CROSS_COMPILE=$CROSS_COMPILE OBJCOPY=$OBJCOPY NM=$NM OBJDUMP=$OBJDUMP || { echo "❌ 编译失败！"; exit 1; }
           
-          # 验证模块生成
+          # 验证模块生成（最终确认）
           if [ -f "./HMA++.ko" ]; then
-            echo "✅ HMA++ KPM 模块编译成功！"
+            echo "🎉 HMA++ KPM 模块编译成功！"
             ls -la ./HMA++.ko
+            file ./HMA++.ko  # 输出模块文件信息，便于验证
           else
             echo "❌ 模块文件未生成！"
             exit 1
