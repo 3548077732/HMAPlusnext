@@ -37,7 +37,6 @@ EXTRA_CFLAGS := $(INCLUDES) \
                 -nostdinc -fno-common \
                 -Wno-implicit-function-declaration \
                 -Wno-incompatible-pointer-types \
-                -I./kernel-headers/kpm  # 适配 KPM 头文件
 
 # 模块编译规则（无缩进，语法零错误）
 obj-m += $(OBJ_NAME)
