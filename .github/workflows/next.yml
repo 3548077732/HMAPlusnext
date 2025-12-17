@@ -27,20 +27,38 @@ jobs:
           sudo apt clean
           chmod -R 777 $(pwd)
 
-      - name: 下载 Android NDK r25c（获取 Android 交叉编译器）
+      - name: 下载 Android NDK r25c（动态适配工具链）
         run: |
           mkdir -p ./ndk
-          # 下载 NDK r25c（适配 Android 内核编译，包含 aarch64-linux-android-gcc）
+          # 下载 NDK r25c（确保工具链完整）
           wget -q https://dl.google.com/android/repository/android-ndk-r25c-linux.zip -O ndk.zip
           unzip -q -o ndk.zip -d ./ndk
-          # 验证 NDK 工具链存在
-          NDK_TOOLCHAIN=$(pwd)/ndk/android-ndk-r25c/toolchains
-          if [ ! -d "$NDK_TOOLCHAIN/aarch64-linux-android-4.9" ] || [ ! -d "$NDK_TOOLCHAIN/arm-linux-androideabi-4.9" ]; then
-            echo "❌ NDK 工具链缺失！"
+          
+          # 动态查找 NDK 工具链目录（不硬编码版本号）
+          NDK_ROOT=$(pwd)/ndk/android-ndk-r25c
+          NDK_TOOLCHAIN=$NDK_ROOT/toolchains
+          
+          # 查找 arm64 工具链（匹配 aarch64-linux-android-* 目录）
+          ARM64_TOOLCHAIN=$(find $NDK_TOOLCHAIN -name "aarch64-linux-android-*" -type d | head -n 1)
+          # 查找 arm32 工具链（匹配 arm-linux-androideabi-* 目录）
+          ARM32_TOOLCHAIN=$(find $NDK_TOOLCHAIN -name "arm-linux-androideabi-*" -type d | head -n 1)
+          
+          # 验证工具链存在
+          if [ -z "$ARM64_TOOLCHAIN" ] || [ -z "$ARM32_TOOLCHAIN" ]; then
+            echo "❌ NDK 工具链缺失！实际工具链目录："
+            ls -la $NDK_TOOLCHAIN  # 输出实际目录结构，便于调试
             exit 1
           fi
+          
+          # 保存工具链路径到环境变量（后续步骤使用）
+          echo "ARM64_TOOLCHAIN=$ARM64_TOOLCHAIN" >> $GITHUB_ENV
+          echo "ARM32_TOOLCHAIN=$ARM32_TOOLCHAIN" >> $GITHUB_ENV
+          echo "NDK_ROOT=$NDK_ROOT" >> $GITHUB_ENV
+          
           chmod -R 777 ./ndk
-          echo "✅ NDK r25c 下载并解压成功！"
+          echo "✅ NDK r25c 下载成功！工具链路径："
+          echo "arm64: $ARM64_TOOLCHAIN"
+          echo "arm32: $ARM32_TOOLCHAIN"
 
       - name: 克隆谷歌官方内核（android13-5.15 分支）
         run: |
@@ -66,20 +84,29 @@ jobs:
           chmod -R 777 ./kernel-src ./kernel-headers
           echo "✅ 谷歌内核克隆成功！"
 
-      - name: 配置内核（使用 NDK 交叉编译器）
+      - name: 配置内核（使用动态查找的 NDK 工具链）
         run: |
           ARCH=${{ github.event.inputs.kernel_arch }}
-          NDK_TOOLCHAIN=$(pwd)/ndk/android-ndk-r25c/toolchains
           cd ./kernel-src
           
-          # 配置交叉编译器路径（使用 NDK 工具链，而非系统编译器）
+          # 从环境变量获取工具链路径，拼接编译器前缀
           if [ "$ARCH" = "arm64" ]; then
-            export CROSS_COMPILE=$NDK_TOOLCHAIN/aarch64-linux-android-4.9/prebuilt/linux-x86_64/bin/aarch64-linux-android-
-            make ARCH=arm64 CROSS_COMPILE=$CROSS_COMPILE defconfig
+            TOOLCHAIN_BIN=${{ env.ARM64_TOOLCHAIN }}/prebuilt/linux-x86_64/bin
+            export CROSS_COMPILE=$TOOLCHAIN_BIN/aarch64-linux-android-
           else
-            export CROSS_COMPILE=$NDK_TOOLCHAIN/arm-linux-androideabi-4.9/prebuilt/linux-x86_64/bin/arm-linux-androideabi-
-            make ARCH=arm CROSS_COMPILE=$CROSS_COMPILE defconfig
+            TOOLCHAIN_BIN=${{ env.ARM32_TOOLCHAIN }}/prebuilt/linux-x86_64/bin
+            export CROSS_COMPILE=$TOOLCHAIN_BIN/arm-linux-androideabi-
           fi
+          
+          # 验证编译器存在
+          if [ ! -f "${CROSS_COMPILE}gcc" ]; then
+            echo "❌ 编译器不存在！路径：${CROSS_COMPILE}gcc"
+            ls -la $TOOLCHAIN_BIN
+            exit 1
+          fi
+          
+          # 生成内核配置
+          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE defconfig
           
           # 开启模块支持配置
           sed -i 's/# CONFIG_MODULES is not set/CONFIG_MODULES=y/' .config
@@ -121,19 +148,26 @@ jobs:
           EOF
           chmod 777 ./kernel-headers/linux/kpm.h
 
-      - name: 编译 HMA++ KPM 模块（使用 NDK 工具链）
+      - name: 编译 HMA++ KPM 模块（动态工具链路径）
         run: |
           export KERNELDIR=$(pwd)/kernel-src
           export ARCH=${{ github.event.inputs.kernel_arch }}
-          NDK_TOOLCHAIN=$(pwd)/ndk/android-ndk-r25c/toolchains
           
-          # 配置交叉编译器+头文件路径
+          # 从环境变量获取工具链路径
           if [ "$ARCH" = "arm64" ]; then
-            export CROSS_COMPILE=$NDK_TOOLCHAIN/aarch64-linux-android-4.9/prebuilt/linux-x86_64/bin/aarch64-linux-android-
+            TOOLCHAIN_BIN=${{ env.ARM64_TOOLCHAIN }}/prebuilt/linux-x86_64/bin
+            export CROSS_COMPILE=$TOOLCHAIN_BIN/aarch64-linux-android-
             export EXTRA_CFLAGS="-I$(pwd)/kernel-headers -I$(pwd)/kernel-headers/linux -I$(pwd)/kernel-headers/arch-include -I$KERNELDIR/arch/arm64/include/generated -Wall -Wextra -O2 -fPIC -w -DKERNEL_5_15 -fno-pie"
           else
-            export CROSS_COMPILE=$NDK_TOOLCHAIN/arm-linux-androideabi-4.9/prebuilt/linux-x86_64/bin/arm-linux-androideabi-
+            TOOLCHAIN_BIN=${{ env.ARM32_TOOLCHAIN }}/prebuilt/linux-x86_64/bin
+            export CROSS_COMPILE=$TOOLCHAIN_BIN/arm-linux-androideabi-
             export EXTRA_CFLAGS="-I$(pwd)/kernel-headers -I$(pwd)/kernel-headers/linux -I$(pwd)/kernel-headers/arch-include -I$KERNELDIR/arch/arm/include/generated -Wall -Wextra -O2 -fPIC -w -DKERNEL_5_15 -fno-pie"
+          fi
+          
+          # 验证编译器存在
+          if [ ! -f "${CROSS_COMPILE}gcc" ]; then
+            echo "❌ 编译器路径错误！"
+            exit 1
           fi
           
           chmod 777 ./Makefile
