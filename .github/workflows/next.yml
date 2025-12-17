@@ -11,99 +11,129 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout HMA++ 源码（自动适配项目目录）
+      - name: Checkout HMA++ 源码
         uses: actions/checkout@v5
 
-      - name: Checkout KernelPatch（使用相对路径，避免硬编码）
-        uses: actions/checkout@v5
-        with:
-          repository: bmax121/KernelPatch
-          path: ./KernelPatch  # 相对路径，直接放在项目根目录下
-
-      - name: 验证 KernelPatch 目录结构
-        run: |
-          ls -R ./KernelPatch  # 相对路径查看
-          # 确保核心 kpm.mk 存在，不存在则下载备用
-          KPM_MK_PATH="./KernelPatch/kpm/kpm.mk"
-          if [ ! -f "$KPM_MK_PATH" ]; then
-            echo "⚠️  未找到 kpm.mk，下载备用版本"
-            mkdir -p ./KernelPatch/kpm
-            wget -q -O $KPM_MK_PATH "https://raw.githubusercontent.com/bmax121/KernelPatch/main/kpm/kpm.mk"
-          fi
-          chmod -R 777 ./KernelPatch
-
-      - name: 安装完整依赖
+      - name: 安装完整编译依赖
         run: |
           sudo apt update -y
-          sudo apt install -y build-essential wget unzip clang llvm lld binutils
+          sudo apt install -y build-essential wget unzip clang llvm lld binutils libssl-dev libelf-dev
           sudo apt clean
+          chmod -R 777 $(pwd)
 
-      - name: 下载并解压 Android NDK r25c（兼容 KernelPatch）
+      - name: 下载并解压 Android NDK r25c（稳定兼容 5.15 内核）
         run: |
+          # 下载 NDK（避免速度限制，使用官方直连）
           wget -q https://dl.google.com/android/repository/android-ndk-r25c-linux.zip -O ndk.zip
           unzip -q -o ndk.zip
-          # 相对路径验证 NDK
           NDK_ROOT=$(pwd)/android-ndk-r25c
-          if [ ! -d "$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64" ]; then
-            echo "❌ NDK 解压失败！"
+          
+          # 验证 NDK 工具链完整性
+          TOOLCHAIN=$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64
+          if [ ! -f "$TOOLCHAIN/bin/aarch64-linux-android24-clang" ] || [ ! -f "$TOOLCHAIN/bin/ld.lld" ]; then
+            echo "❌ NDK 工具链缺失！"
             exit 1
           fi
+          
           echo "NDK_ROOT=$NDK_ROOT" >> $GITHUB_ENV
+          echo "TOOLCHAIN=$TOOLCHAIN" >> $GITHUB_ENV
           chmod -R 777 $NDK_ROOT
+          echo "✅ NDK 准备成功！"
 
-      - name: 配置 KernelPatch 构建环境
+      - name: 补充 Android 5.15 内核头文件（解决头文件缺失）
         run: |
-          # 复制核心构建文件到项目根目录（相对路径）
-          cp -r ./KernelPatch/kpm ./kpm
-          # 编写配置文件（适配 arm64 架构）
-          ARCH="arm64"
-          TARGET="aarch64-linux-android"
-          cat > ./kpm_config.mk << EOF
-          NDK_ROOT := ${{ env.NDK_ROOT }}
-          ARCH := $ARCH
-          TARGET := $TARGET
-          CC := \$(NDK_ROOT)/toolchains/llvm/prebuilt/linux-x86_64/bin/\$(TARGET)24-clang
-          LD := \$(NDK_ROOT)/toolchains/llvm/prebuilt/linux-x86_64/bin/ld.lld
-          OBJCOPY := \$(NDK_ROOT)/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-objcopy
-          NM := \$(NDK_ROOT)/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm
-          EXTRA_CFLAGS := -target \$(TARGET) -Wall -O2 -fPIC -w -DKERNEL_5_15 -fno-pie -nostdinc -I\$(NDK_ROOT)/sysroot/usr/include -I\$(NDK_ROOT)/sysroot/usr/include/\$(TARGET)
-          EOF
-          chmod 777 ./kpm ./kpm_config.mk
+          # 克隆谷歌 5.15 内核头文件（仅复制必要目录，避免冗余）
+          git clone --depth 1 -b android13-5.15 https://android.googlesource.com/kernel/common.git kernel-src
+          KERNEL_HEADERS=$(pwd)/kernel-src/include
+          
+          # 复制核心头文件到项目目录
+          mkdir -p ./kernel-headers
+          cp -r $KERNEL_HEADERS/linux ./kernel-headers/
+          cp -r $KERNEL_HEADERS/asm-generic ./kernel-headers/
+          cp -r $KERNEL_HEADERS/uapi ./kernel-headers/
+          cp -r ./kernel-src/arch/arm64/include ./kernel-headers/arch-arm64
+          
+          # 验证关键头文件存在
+          [ ! -f "./kernel-headers/linux/kernel.h" ] && { echo "❌ 内核头文件缺失！"; exit 1; }
+          [ ! -f "./kernel-headers/arch-arm64/asm/cache.h" ] && { echo "❌ asm/cache.h 缺失！"; exit 1; }
+          
+          chmod -R 777 ./kernel-headers
+          echo "✅ 内核头文件准备成功！"
 
-      - name: 编写适配 Makefile
+      - name: 编写纯手动 Makefile（无 kpm.mk 依赖）
         run: |
           cat > ./Makefile << EOF
-          include ./kpm/kpm.mk
-          include ./kpm_config.mk
-
-          # 模块信息
+          # 模块基础配置
           MODULE_NAME := HMA++
-          MODULE_AUTHOR := NightFallsLikeRain
-          MODULE_DESCRIPTION := "HMA++ Next: 基于白名单的应用文件操作拦截 KPM 模块"
-          MODULE_LICENSE := GPL-2.0
-          MODULE_VERSION := 1.0.0
-
-          # 源码文件
-          SRC_FILES := HMA++.c
-
+          OBJ_NAME := \$(MODULE_NAME).o
+          KO_NAME := \$(MODULE_NAME).ko
+          KPM_NAME := \$(MODULE_NAME).kpm
+          
+          # 工具链配置（NDK r25c + arm64）
+          NDK_ROOT := ${{ env.NDK_ROOT }}
+          TOOLCHAIN := ${{ env.TOOLCHAIN }}
+          CC := \$(TOOLCHAIN)/bin/aarch64-linux-android24-clang
+          LD := \$(TOOLCHAIN)/bin/ld.lld
+          OBJCOPY := \$(TOOLCHAIN)/bin/llvm-objcopy
+          NM := \$(TOOLCHAIN)/bin/llvm-nm
+          KERNELDIR := \$(NDK_ROOT)/sysroot
+          
+          # 头文件路径（解决所有头文件缺失问题）
+          INCLUDES := -I./kernel-headers \
+                      -I./kernel-headers/arch-arm64 \
+                      -I./kernel-headers/arch-arm64/asm \
+                      -I./kernel-headers/linux \
+                      -I./kernel-headers/asm-generic \
+                      -I./kernel-headers/uapi \
+                      -I\$(KERNELDIR)/usr/include \
+                      -I\$(KERNELDIR)/usr/include/aarch64-linux-android
+          
+          # 编译选项（兼容 5.15 内核 + LLVM）
+          EXTRA_CFLAGS := \$(INCLUDES) \
+                          -target aarch64-linux-android \
+                          -DKERNEL_5_15 \
+                          -D__KERNEL__ \
+                          -DMODULE \
+                          -Wall -O2 -fPIC -w \
+                          -fno-pie -fno-asynchronous-unwind-tables \
+                          -mgeneral-regs-only -march=armv8-a \
+                          -nostdinc -fno-common
+          
+          # 模块构建规则（标准内核模块编译）
+          obj-m += \$(OBJ_NAME)
+          \$(OBJ_NAME): \$(MODULE_NAME).c
+              \$(MAKE) -C \$(KERNELDIR) M=\$(PWD) ARCH=arm64 CC=\$(CC) LD=\$(LD) EXTRA_CFLAGS="\$(EXTRA_CFLAGS)" modules
+          
           # 构建目标（输出 HMA++.kpm）
-          all: \$(MODULE_NAME).ko
-              mv \$(MODULE_NAME).ko \$(MODULE_NAME).kpm
-
+          all: \$(KO_NAME)
+              mv \$(KO_NAME) \$(KPM_NAME)
+          
+          # 清理目标
           clean:
-              rm -f \$(MODULE_NAME).ko \$(MODULE_NAME).kpm *.mod.c *.o .*.cmd Module.symvers modules.order
+              \$(MAKE) -C \$(KERNELDIR) M=\$(PWD) clean
+              rm -f \$(KPM_NAME)
           EOF
-          # 验证源码文件
-          if [ ! -f "./HMA++.c" ]; then
-            echo "❌ 未找到 HMA++.c 源码文件！"
+          
+          # 验证源码文件存在
+          [ ! -f "./HMA++.c" ] && { echo "❌ 未找到 HMA++.c 源码文件！"; exit 1; }
+          chmod 777 ./Makefile ./HMA++.c
+          echo "✅ 纯手动 Makefile 编写完成！"
+
+      - name: 编译 HMA++ KPM 模块
+        run: |
+          # 单线程编译（避免并发冲突，确保日志完整）
+          make -j1 V=1 || { echo "❌ 编译失败！"; exit 1; }
+          
+          # 验证产物生成
+          if [ ! -f "./HMA++.kpm" ]; then
+            echo "❌ 目标产物 HMA++.kpm 未生成！"
+            ls -la ./
             exit 1
           fi
-          chmod 777 ./Makefile ./HMA++.c
+          echo "🎉 HMA++ KPM 模块编译成功！"
+          file ./HMA++.kpm
 
-      - name: 编译 HMA++ 模块
-        run: make -j2 V=1 || { echo "❌ 编译失败！"; exit 1; }
-
-      - name: 上传产物（保持用户模板命名）
+      - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
           name: HMA++.kpm
