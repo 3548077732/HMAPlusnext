@@ -1,4 +1,4 @@
-name: Build2
+name: Build
 
 on:
   push:
@@ -14,72 +14,84 @@ jobs:
       - name: Checkout HMA++ 源码
         uses: actions/checkout@v5
 
-      - name: 安装完整编译依赖（无额外冗余）
+      - name: 安装完整编译依赖
         run: |
           sudo apt update -y && sudo apt install -y \
             build-essential clang llvm lld binutils \
-            wget unzip libssl-dev libelf-dev git  # 仅保留必需依赖
+            wget unzip libssl-dev libelf-dev git
           sudo apt clean
           echo "✅ 依赖安装完成！"
 
-      - name: 下载并配置 NDK r25c（核心工具链）
+      - name: 下载并解压 NDK r25c（验证目录结构）
         run: |
-          echo "📥 下载 Android NDK r25c（官方高速链接）"
+          echo "📥 下载 NDK r25c..."
           wget -q https://dl.google.com/android/repository/android-ndk-r25c-linux.zip -O ndk.zip
-          echo "📦 解压 NDK..."
           unzip -q -o ndk.zip
           NDK_ROOT=$(pwd)/android-ndk-r25c
           
-          # 验证工具链完整性
+          # 关键验证：工具链和 sysroot 是否存在
           TOOLCHAIN=$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64
-          if [ ! -f "$TOOLCHAIN/bin/aarch64-linux-android24-clang" ] || [ ! -f "$TOOLCHAIN/bin/ld.lld" ]; then
-            echo "❌ NDK 工具链缺失！"
+          SYSROOT=$TOOLCHAIN/sysroot
+          if [ ! -d "$TOOLCHAIN" ]; then
+            echo "❌ NDK 工具链缺失！路径：$TOOLCHAIN"
+            ls -la $NDK_ROOT/toolchains/llvm/prebuilt/
+            exit 1
+          fi
+          if [ ! -d "$SYSROOT" ]; then
+            echo "❌ sysroot 路径不存在！正确路径：$SYSROOT"
+            ls -la $TOOLCHAIN/
             exit 1
           fi
           
-          # 配置环境变量
+          # 配置环境变量（传递给 Makefile）
           echo "NDK_ROOT=$NDK_ROOT" >> $GITHUB_ENV
           echo "TOOLCHAIN=$TOOLCHAIN" >> $GITHUB_ENV
           chmod -R 777 $NDK_ROOT
-          echo "✅ NDK 准备成功！路径：$NDK_ROOT"
+          echo "✅ NDK 准备成功！sysroot：$SYSROOT"
 
-      - name: 克隆 Android 5.15 内核头文件（解决所有头文件依赖）
+      - name: 克隆 Android 5.15 内核头文件（含 KPM 头文件）
         run: |
-          echo "📥 克隆内核核心头文件（仅必要目录，提速）"
+          echo "📥 克隆内核头文件..."
           git clone --depth 1 -b android13-5.15 https://android.googlesource.com/kernel/common.git kernel-src
           mkdir -p ./kernel-headers
           
-          # 复制核心头文件（覆盖所有内核依赖）
+          # 复制核心内核头文件
           cp -r kernel-src/include/linux ./kernel-headers/
           cp -r kernel-src/include/asm-generic ./kernel-headers/
           cp -r kernel-src/include/uapi ./kernel-headers/
           cp -r kernel-src/arch/arm64/include ./kernel-headers/arch-arm64
           cp -r kernel-src/arch/arm64/include/asm ./kernel-headers/arch-arm64/asm
           
+          # 复制 KPM 头文件（适配 5.15+ 内核 KPM 框架）
+          mkdir -p ./kernel-headers/kpm
+          wget -q -O ./kernel-headers/kpm/kpm.h "https://raw.githubusercontent.com/bmax121/KernelPatch/main/kpm/kpm.h"
+          
           # 验证关键头文件
-          [ ! -f "./kernel-headers/linux/kernel.h" ] && { echo "❌ 内核头文件缺失！"; exit 1; }
+          [ ! -f "./kernel-headers/kpm/kpm.h" ] && { echo "❌ KPM 头文件缺失！"; exit 1; }
           [ ! -f "./kernel-headers/arch-arm64/asm/cache.h" ] && { echo "❌ asm/cache.h 缺失！"; exit 1; }
           
           chmod -R 777 ./kernel-headers
           echo "✅ 内核头文件准备成功！"
 
-      - name: 生成纯手动 Makefile（无任何第三方依赖）
+      - name: 生成修正后的 Makefile
         run: |
+          # 写入上面的修正版 Makefile
           cat > ./Makefile << EOF
-          # 纯手动编译 Makefile（无 kpm.mk，无 KernelPatch）
+          # 纯手动编译 Makefile（修复 NDK sysroot 路径，适配 Android 13-5.15+）
           MODULE_NAME := HMA++
           OBJ_NAME := \$(MODULE_NAME).o
           KO_NAME := \$(MODULE_NAME).ko
           KPM_NAME := \$(MODULE_NAME).kpm
 
-          # 工具链配置（从环境变量读取）
-          NDK_ROOT ?= \$(ENV{NDK_ROOT})
-          TOOLCHAIN ?= \$(ENV{TOOLCHAIN})
+          # 工具链配置（从 GitHub Actions 环境变量读取，路径修正）
+          NDK_ROOT ?= ./android-ndk-r25c
+          TOOLCHAIN := \$(NDK_ROOT)/toolchains/llvm/prebuilt/linux-x86_64
           CC := \$(TOOLCHAIN)/bin/aarch64-linux-android24-clang
           LD := \$(TOOLCHAIN)/bin/ld.lld
-          KERNELDIR := \$(NDK_ROOT)/sysroot
+          # 关键修正：sysroot 在工具链目录下，而非 NDK 根目录
+          KERNELDIR := \$(TOOLCHAIN)/sysroot
 
-          # 头文件路径（覆盖所有依赖，无遗漏）
+          # 头文件路径（基于修正后的 sysroot，覆盖所有依赖）
           INCLUDES := -I./kernel-headers \
                       -I./kernel-headers/arch-arm64 \
                       -I./kernel-headers/arch-arm64/asm \
@@ -87,9 +99,11 @@ jobs:
                       -I./kernel-headers/asm-generic \
                       -I./kernel-headers/uapi \
                       -I\$(KERNELDIR)/usr/include \
-                      -I\$(KERNELDIR)/usr/include/aarch64-linux-android
+                      -I\$(KERNELDIR)/usr/include/aarch64-linux-android \
+                      -I\$(NDK_ROOT)/sysroot/usr/include \
+                      -I\$(NDK_ROOT)/sysroot/usr/include/aarch64-linux-android
 
-          # 编译选项（适配 5.15 内核 arm64，兼容 LLVM）
+          # 编译选项（适配 5.15+ 内核 + LLVM，添加 KPM 头文件路径）
           EXTRA_CFLAGS := \$(INCLUDES) \
                           -target aarch64-linux-android \
                           -DKERNEL_5_15 \
@@ -100,13 +114,14 @@ jobs:
                           -mgeneral-regs-only -march=armv8-a \
                           -nostdinc -fno-common \
                           -Wno-implicit-function-declaration \
-                          -Wno-incompatible-pointer-types
+                          -Wno-incompatible-pointer-types \
+                          -I./kernel-headers/kpm  # 适配 KPM 头文件
 
           # 模块编译规则（无缩进，语法零错误）
           obj-m += \$(OBJ_NAME)
           \$(OBJ_NAME): \$(MODULE_NAME).c; \$(MAKE) -C \$(KERNELDIR) M=\$(PWD) ARCH=arm64 CC=\$(CC) LD=\$(LD) EXTRA_CFLAGS="\$(EXTRA_CFLAGS)" modules
 
-          # 构建目标（产物重命名为 HMA++.kpm）
+          # 构建目标（产物重命名）
           all: \$(KO_NAME); mv \$(KO_NAME) \$(KPM_NAME); echo "✅ 编译完成！产物：\$(KPM_NAME)"
 
           # 清理目标
@@ -115,17 +130,17 @@ jobs:
           .PHONY: all clean
           EOF
           
-          # 验证源码文件存在
+          # 验证源码文件
           [ ! -f "./HMA++.c" ] && { echo "❌ 未找到 HMA++.c 源码文件！"; exit 1; }
           chmod 777 ./Makefile ./HMA++.c
-          echo "✅ 纯手动 Makefile 生成完成！"
+          echo "✅ Makefile 生成完成！"
 
-      - name: 编译 HMA++ 模块（详细日志，便于排错）
+      - name: 编译 HMA++ 模块（详细日志）
         run: |
-          echo "🔨 开始编译模块..."
+          echo "🔨 开始编译模块...（sysroot：$TOOLCHAIN/sysroot）"
           make V=1 || { echo "❌ 编译失败！"; exit 1; }
 
-      - name: 验证产物存在
+      - name: 验证产物并上传
         run: |
           if [ ! -f "./HMA++.kpm" ]; then
             echo "❌ 目标产物 HMA++.kpm 未生成！"
@@ -133,8 +148,6 @@ jobs:
             exit 1
           fi
           echo "✅ 产物验证成功！"
-
-      - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
           name: HMA++.kpm
