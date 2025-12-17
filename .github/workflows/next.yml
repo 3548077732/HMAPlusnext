@@ -20,45 +20,43 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Install All Dependencies（内核+NDK 必需）
+      - name: Install All Dependencies（LLVM+内核必需）
         run: |
           sudo apt update -y
-          sudo apt install -y build-essential git wget unzip flex bison bc libssl-dev libelf-dev dwarves
+          sudo apt install -y build-essential git wget unzip flex bison bc libssl-dev libelf-dev dwarves clang
           sudo apt clean
           chmod -R 777 $(pwd)
 
-      - name: 下载 Android NDK r25c（动态适配工具链）
+      - name: 下载 Android NDK r25c（LLVM 工具链适配）
         run: |
           mkdir -p ./ndk
-          # 下载 NDK r25c（确保工具链完整）
+          # 下载 NDK r25c（仅保留 LLVM 工具链，无需传统 GCC）
           wget -q https://dl.google.com/android/repository/android-ndk-r25c-linux.zip -O ndk.zip
           unzip -q -o ndk.zip -d ./ndk
           
-          # 动态查找 NDK 工具链目录（不硬编码版本号）
+          # 动态查找 LLVM 工具链（NDK r25c 唯一工具链）
           NDK_ROOT=$(pwd)/ndk/android-ndk-r25c
-          NDK_TOOLCHAIN=$NDK_ROOT/toolchains
+          # LLVM 预编译目录：匹配 linux-x86_64 架构（GitHub Actions 环境）
+          LLVM_PREBUILT=$(find $NDK_ROOT/toolchains/llvm/prebuilt -name "linux-x86_64" -type d | head -n 1)
+          LLVM_BIN=$LLVM_PREBUILT/bin
           
-          # 查找 arm64 工具链（匹配 aarch64-linux-android-* 目录）
-          ARM64_TOOLCHAIN=$(find $NDK_TOOLCHAIN -name "aarch64-linux-android-*" -type d | head -n 1)
-          # 查找 arm32 工具链（匹配 arm-linux-androideabi-* 目录）
-          ARM32_TOOLCHAIN=$(find $NDK_TOOLCHAIN -name "arm-linux-androideabi-*" -type d | head -n 1)
-          
-          # 验证工具链存在
-          if [ -z "$ARM64_TOOLCHAIN" ] || [ -z "$ARM32_TOOLCHAIN" ]; then
-            echo "❌ NDK 工具链缺失！实际工具链目录："
-            ls -la $NDK_TOOLCHAIN  # 输出实际目录结构，便于调试
+          # 验证 LLVM 编译器存在（核心验证）
+          ARM64_CC="$LLVM_BIN/aarch64-linux-android-clang"
+          ARM32_CC="$LLVM_BIN/arm-linux-androideabi-clang"
+          if [ ! -f "$ARM64_CC" ] || [ ! -f "$ARM32_CC" ]; then
+            echo "❌ LLVM 编译器缺失！实际目录："
+            ls -la $LLVM_BIN
             exit 1
           fi
           
-          # 保存工具链路径到环境变量（后续步骤使用）
-          echo "ARM64_TOOLCHAIN=$ARM64_TOOLCHAIN" >> $GITHUB_ENV
-          echo "ARM32_TOOLCHAIN=$ARM32_TOOLCHAIN" >> $GITHUB_ENV
+          # 保存 LLVM 路径到环境变量
+          echo "LLVM_BIN=$LLVM_BIN" >> $GITHUB_ENV
           echo "NDK_ROOT=$NDK_ROOT" >> $GITHUB_ENV
           
           chmod -R 777 ./ndk
-          echo "✅ NDK r25c 下载成功！工具链路径："
-          echo "arm64: $ARM64_TOOLCHAIN"
-          echo "arm32: $ARM32_TOOLCHAIN"
+          echo "✅ NDK r25c LLVM 工具链准备成功！"
+          echo "arm64 编译器：$ARM64_CC"
+          echo "arm32 编译器：$ARM32_CC"
 
       - name: 克隆谷歌官方内核（android13-5.15 分支）
         run: |
@@ -84,37 +82,36 @@ jobs:
           chmod -R 777 ./kernel-src ./kernel-headers
           echo "✅ 谷歌内核克隆成功！"
 
-      - name: 配置内核（使用动态查找的 NDK 工具链）
+      - name: 配置内核（LLVM/Clang 编译适配）
         run: |
           ARCH=${{ github.event.inputs.kernel_arch }}
+          LLVM_BIN=${{ env.LLVM_BIN }}
           cd ./kernel-src
           
-          # 从环境变量获取工具链路径，拼接编译器前缀
+          # 配置 LLVM 交叉编译器（Android 13 内核原生支持）
           if [ "$ARCH" = "arm64" ]; then
-            TOOLCHAIN_BIN=${{ env.ARM64_TOOLCHAIN }}/prebuilt/linux-x86_64/bin
-            export CROSS_COMPILE=$TOOLCHAIN_BIN/aarch64-linux-android-
+            export CROSS_COMPILE=$LLVM_BIN/aarch64-linux-android-
+            export CC=$LLVM_BIN/clang  # 明确指定 Clang 编译器
+            export LD=$LLVM_BIN/ld.lld
           else
-            TOOLCHAIN_BIN=${{ env.ARM32_TOOLCHAIN }}/prebuilt/linux-x86_64/bin
-            export CROSS_COMPILE=$TOOLCHAIN_BIN/arm-linux-androideabi-
+            export CROSS_COMPILE=$LLVM_BIN/arm-linux-androideabi-
+            export CC=$LLVM_BIN/clang
+            export LD=$LLVM_BIN/ld.lld
           fi
           
-          # 验证编译器存在
-          if [ ! -f "${CROSS_COMPILE}gcc" ]; then
-            echo "❌ 编译器不存在！路径：${CROSS_COMPILE}gcc"
-            ls -la $TOOLCHAIN_BIN
-            exit 1
-          fi
+          # 生成内核配置（指定 LLVM 工具链）
+          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE CC=$CC LD=$LD defconfig
           
-          # 生成内核配置
-          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE defconfig
-          
-          # 开启模块支持配置
+          # 开启模块支持+LLVM 编译兼容配置
           sed -i 's/# CONFIG_MODULES is not set/CONFIG_MODULES=y/' .config
           sed -i 's/# CONFIG_MODULE_UNLOAD is not set/CONFIG_MODULE_UNLOAD=y/' .config
           sed -i 's/# CONFIG_MODULE_FORCE_LOAD is not set/CONFIG_MODULE_FORCE_LOAD=y/' .config
           sed -i 's/# CONFIG_RETPOLINE is not set/CONFIG_RETPOLINE=y/' .config
           sed -i 's/# CONFIG_ANDROID is not set/CONFIG_ANDROID=y/' .config
           sed -i 's/# CONFIG_MODULE_SIG is not set/CONFIG_MODULE_SIG=n/' .config
+          sed -i 's/# CONFIG_LLVM=y/CONFIG_LLVM=y/' .config  # 强制开启 LLVM 支持
+          sed -i 's/# CONFIG_LLVM_IAS=y/CONFIG_LLVM_IAS=y/' .config  # LLVM 内联汇编支持
+          
           cd ..
 
       - name: 补充 KPM 核心头文件
@@ -148,31 +145,35 @@ jobs:
           EOF
           chmod 777 ./kernel-headers/linux/kpm.h
 
-      - name: 编译 HMA++ KPM 模块（动态工具链路径）
+      - name: 编译 HMA++ KPM 模块（LLVM 最终构建）
         run: |
           export KERNELDIR=$(pwd)/kernel-src
           export ARCH=${{ github.event.inputs.kernel_arch }}
+          LLVM_BIN=${{ env.LLVM_BIN }}
           
-          # 从环境变量获取工具链路径
+          # 配置 LLVM 编译器路径
           if [ "$ARCH" = "arm64" ]; then
-            TOOLCHAIN_BIN=${{ env.ARM64_TOOLCHAIN }}/prebuilt/linux-x86_64/bin
-            export CROSS_COMPILE=$TOOLCHAIN_BIN/aarch64-linux-android-
+            export CROSS_COMPILE=$LLVM_BIN/aarch64-linux-android-
+            export CC=$LLVM_BIN/clang
+            export LD=$LLVM_BIN/ld.lld
             export EXTRA_CFLAGS="-I$(pwd)/kernel-headers -I$(pwd)/kernel-headers/linux -I$(pwd)/kernel-headers/arch-include -I$KERNELDIR/arch/arm64/include/generated -Wall -Wextra -O2 -fPIC -w -DKERNEL_5_15 -fno-pie"
           else
-            TOOLCHAIN_BIN=${{ env.ARM32_TOOLCHAIN }}/prebuilt/linux-x86_64/bin
-            export CROSS_COMPILE=$TOOLCHAIN_BIN/arm-linux-androideabi-
+            export CROSS_COMPILE=$LLVM_BIN/arm-linux-androideabi-
+            export CC=$LLVM_BIN/clang
+            export LD=$LLVM_BIN/ld.lld
             export EXTRA_CFLAGS="-I$(pwd)/kernel-headers -I$(pwd)/kernel-headers/linux -I$(pwd)/kernel-headers/arch-include -I$KERNELDIR/arch/arm/include/generated -Wall -Wextra -O2 -fPIC -w -DKERNEL_5_15 -fno-pie"
           fi
           
-          # 验证编译器存在
-          if [ ! -f "${CROSS_COMPILE}gcc" ]; then
-            echo "❌ 编译器路径错误！"
+          # 验证编译器完整性
+          if [ ! -f "$CC" ] || [ ! -f "$LD" ]; then
+            echo "❌ LLVM 编译器路径错误！"
             exit 1
           fi
           
           chmod 777 ./Makefile
           make clean || true
-          make -j2 V=1 || { echo "❌ 编译失败！"; exit 1; }
+          # 强制使用 LLVM 编译，指定 CC/LD
+          make -j2 V=1 CC=$CC LD=$LD || { echo "❌ 编译失败！"; exit 1; }
           
           # 验证模块生成
           if [ -f "./HMA++.ko" ]; then
