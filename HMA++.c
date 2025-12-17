@@ -31,13 +31,14 @@ static void before_openat(hook_fargs5_t *args, void *udata) {
     if (!hma_enabled) return;
 
     char path[PATH_MAX] = {0};
-    // 安全读取用户空间路径（增加错误处理，避免内核Oops）
+    // 安全读取用户空间路径（使用 KernelPatch 兼容函数 kf_strncpy_from_user）
     if (syscall_argn(args, 1) == NULL) {
         pr_warn("[HMA++] openat: 空路径\n");
         return;
     }
 
-    long len = strncpy_from_user(path, (void *)syscall_argn(args, 1), PATH_MAX - 1);
+    // 替换 strncpy_from_user → kf_strncpy_from_user（框架兼容函数）
+    long len = kf_strncpy_from_user(path, (void *)syscall_argn(args, 1), PATH_MAX - 1);
     if (len <= 0) {
         pr_warn("[HMA++] openat: 路径读取失败\n");
         return;
@@ -83,7 +84,8 @@ static long hma_control0(const char *args, char *__user out_msg, int outlen) {
 
 out:
     if (out_msg && outlen >= strlen(msg) + 1) {
-        strncpy_to_user(out_msg, msg, strlen(msg) + 1);
+        // 替换 strncpy_to_user → kf_strncpy_to_user（框架兼容函数）
+        kf_strncpy_to_user(out_msg, msg, strlen(msg) + 1);
     }
     return 0;
 }
@@ -95,7 +97,8 @@ static long hma_control1(void *a1, void *a2, void *a3) {
     char msg[] = "广告控制暂未启用（最小版本）";
 
     if (out_msg && outlen >= sizeof(msg)) {
-        strncpy_to_user(out_msg, msg, sizeof(msg));
+        // 替换 strncpy_to_user → kf_strncpy_to_user（框架兼容函数）
+        kf_strncpy_to_user(out_msg, msg, sizeof(msg));
     }
     return 0;
 }
