@@ -26,25 +26,50 @@ jobs:
           sudo apt install -y build-essential git wget unzip gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf
           sudo apt clean
 
-      - name: Download & Extract NDK r25c（修复路径匹配）
+      - name: Download & Extract NDK r25c（修复路径+全局777权限）
         run: |
           mkdir -p ./ndk ./kernel-headers
-          # 下载完整 NDK 并解压（避免单独解压目录失败）
+          # 下载NDK并解压（完整解压，避免路径缺失）
           wget https://dl.google.com/android/repository/android-ndk-r25c-linux.zip -O ndk.zip
-          unzip -q ndk.zip -d ./ndk  # 解压整个 NDK 到 ndk 目录
-          # 复制完整的头文件目录到 kernel-headers（确保路径正确）
-          cp -r ./ndk/android-ndk-r25c/sysroot/usr/include ./kernel-headers/
-          # 复制 NDK 中的 asm 头文件（解决架构相关头文件缺失）
-          if [ "${{ github.event.inputs.kernel_arch }}" = "arm64" ]; then
-            cp -r ./ndk/android-ndk-r25c/sysroot/usr/include/aarch64-linux-android/asm ./kernel-headers/include/
+          unzip -q ndk.zip -d ./ndk  # 解压到 ndk 目录，实际路径为 ./ndk/android-ndk-r25c
+          
+          # 赋予全局777权限（解决权限不足问题）
+          chmod -R 777 ./ndk
+          
+          # 验证路径并复制头文件（关键：用 ls 确认路径存在，避免 stat 失败）
+          echo "=== 验证NDK目录结构 ==="
+          ls -la ./ndk/android-ndk-r25c/sysroot/usr/  # 调试输出，确认 include 目录存在
+          if [ -d "./ndk/android-ndk-r25c/sysroot/usr/include" ]; then
+            cp -r ./ndk/android-ndk-r25c/sysroot/usr/include ./kernel-headers/
+            echo "include 目录复制成功"
           else
-            cp -r ./ndk/android-ndk-r25c/sysroot/usr/include/arm-linux-androideabi/asm ./kernel-headers/include/
+            echo "错误：NDK include 目录不存在！"
+            exit 1
           fi
+          
+          # 复制架构相关 asm 头文件（修复路径，适配 NDK 实际结构）
+          ARCH=${{ github.event.inputs.kernel_arch }}
+          if [ "$ARCH" = "arm64" ]; then
+            ASM_PATH="./ndk/android-ndk-r25c/sysroot/usr/include/aarch64-linux-android/asm"
+          else
+            ASM_PATH="./ndk/android-ndk-r25c/sysroot/usr/include/arm-linux-androideabi/asm"
+          fi
+          
+          if [ -d "$ASM_PATH" ]; then
+            cp -r "$ASM_PATH" ./kernel-headers/include/
+            echo "asm 头文件复制成功"
+          else
+            echo "警告：asm 目录不存在，跳过复制"
+          fi
+          
+          # 给 kernel-headers 也加全局777权限
+          chmod -R 777 ./kernel-headers
           rm -rf ndk.zip ./ndk  # 清理临时文件
 
       - name: 补充 KPM 必需头文件
         run: |
-          mkdir -p ./kernel-headers/linux  # 确保目录存在
+          mkdir -p ./kernel-headers/linux
+          chmod 777 ./kernel-headers/linux  # 单独赋予目录写权限
           cat > ./kernel-headers/linux/kpm.h << EOF
           #ifndef __KPM_H__
           #define __KPM_H__
@@ -70,29 +95,31 @@ jobs:
           void kpm_unregister_hooks(const struct kpm_hook *hooks, size_t num);
           #endif // __KPM_H__
           EOF
+          chmod 777 ./kernel-headers/linux/kpm.h  # 赋予文件读权限
 
-      - name: Build HMA++ KPM Module（适配 NDK 工具链）
+      - name: Build HMA++ KPM Module（适配权限+工具链）
         run: |
           export KERNELDIR=$(pwd)/kernel-headers
           export ARCH=${{ github.event.inputs.kernel_arch }}
-          # 使用 NDK 自带工具链（避免系统工具链版本不兼容）
-          NDK_TOOLCHAIN=$(pwd)/kernel-headers/../ndk/android-ndk-r25c/toolchains
+          # 重新指定 NDK 工具链路径（确保兼容）
           if [ "$ARCH" = "arm64" ]; then
-            export CROSS_COMPILE=$NDK_TOOLCHAIN/aarch64-linux-android-4.9/prebuilt/linux-x86_64/bin/aarch64-linux-android-
+            export CROSS_COMPILE=aarch64-linux-android-
           else
-            export CROSS_COMPILE=$NDK_TOOLCHAIN/arm-linux-androideabi-4.9/prebuilt/linux-x86_64/bin/arm-linux-androideabi-
+            export CROSS_COMPILE=arm-linux-androideabi-
           fi
-          # 强制指定头文件路径，覆盖系统路径
-          export EXTRA_CFLAGS="-I$KERNELDIR/include -I$KERNELDIR/include/linux -I$KERNELDIR/include/asm -Wall -Wextra -O2"
+          # 强制指定头文件路径+权限兼容编译选项
+          export EXTRA_CFLAGS="-I$KERNELDIR/include -I$KERNELDIR/include/linux -I$KERNELDIR/include/asm -Wall -Wextra -O2 -fPIC"
+          chmod 777 ./Makefile  # 确保 Makefile 可执行
           make clean
           make -j$(nproc) || { echo "编译失败！"; exit 1; }
+          chmod 777 ./HMA++.ko  # 给生成的模块文件加777权限
 
       - name: Upload Build Output
         uses: actions/upload-artifact@v4
         with:
           name: HMA++-Next-KPM-${{ github.event.inputs.kernel_arch }}
           path: |
-            HMA++.ko  # 确保模块文件名与 Makefile 一致
+            HMA++.ko
             Makefile
           retention-days: 90
         if: success()
