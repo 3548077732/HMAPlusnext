@@ -20,7 +20,7 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: 安装最小化工具链（仅需模块编译必需工具）
+      - name: 安装最小化工具链
         run: |
           sudo apt update -y
           sudo apt install -y build-essential git flex bison bc libssl-dev libelf-dev dwarves clang llvm lld binutils
@@ -42,79 +42,30 @@ jobs:
           chmod -R 777 ./kernel-src ./kernel-headers
           echo "✅ 内核源码准备成功！"
 
-      - name: 核心操作：修改内核 Makefile，剥离 VDSO 依赖
+      - name: 修改内核 Makefile，剥离 VDSO 依赖
         run: |
           ARCH=${{ github.event.inputs.kernel_arch }}
           cd ./kernel-src
           
-          # 1. 删除 Makefile 中 VDSO 相关的强制依赖（关键步骤）
-          # 针对 arm64 架构，删除 arch/arm64/Makefile 中的 vdso_prepare 依赖
+          # 删除 VDSO 相关依赖和 Makefile
           if [ "$ARCH" = "arm64" ]; then
             sed -i '/vdso_prepare/d' arch/arm64/Makefile
-            # 删除 VDSO 目录的编译规则
             rm -rf arch/arm64/kernel/vdso/Makefile
-            # 创建空 Makefile 避免报错
             echo -e "all:\nclean:" > arch/arm64/kernel/vdso/Makefile
           else
             sed -i '/vdso_prepare/d' arch/arm/Makefile
             rm -rf arch/arm/kernel/vdso/Makefile
             echo -e "all:\nclean:" > arch/arm/kernel/vdso/Makefile
           fi
-          
-          # 2. 修改顶层 Makefile，禁用 VDSO 相关目标
           sed -i '/VDSO/d' Makefile
           sed -i '/vdso/d' Makefile
           
-          echo "✅ 内核 Makefile 修改完成，VDSO 依赖已彻底剥离！"
+          echo "✅ VDSO 依赖剥离完成！"
           cd ..
 
-      - name: 配置内核（仅准备模块编译环境，不编译内核）
+      - name: 补充并复制 kpm.h 到内核默认头文件路径（关键修复）
         run: |
-          ARCH=${{ github.event.inputs.kernel_arch }}
-          cd ./kernel-src
-          
-          # 工具链配置（GNU+LLVM 兼容）
-          export CC=clang
-          export LD=ld.lld
-          export OBJCOPY=objcopy
-          export NM=nm
-          export OBJDUMP=objdump
-          
-          # 1. 生成最小化模块配置（仅启用模块必需选项）
-          make ARCH=$ARCH CC=$CC LD=$LD defconfig
-          cat >> .config << EOF
-          CONFIG_MODULES=y
-          CONFIG_MODULE_UNLOAD=y
-          CONFIG_MODULE_FORCE_LOAD=y
-          CONFIG_ANDROID=y
-          CONFIG_MODULE_SIG=n
-          CONFIG_LLVM=y
-          CONFIG_LLVM_IAS=y
-          CONFIG_RETPOLINE=y
-          CONFIG_STACKPROTECTOR=n
-          # 禁用所有调试和 VDSO 相关功能
-          CONFIG_DEBUG_INFO=n
-          CONFIG_VDSO=n
-          CONFIG_VDSO32=n
-          CONFIG_COMPAT_VDSO=n
-          CONFIG_ARM64_VDSO=n
-          CONFIG_ARM64_COMPAT_VDSO=n
-          EOF
-          make ARCH=$ARCH CC=$CC LD=$LD oldconfig -j1 > /dev/null 2>&1
-          
-          # 2. 仅准备模块编译环境（不执行任何内核编译目标）
-          make ARCH=$ARCH CC=$CC LD=$LD modules_prepare -j2 \
-            EXTRA_CFLAGS="-DCONFIG_VDSO=n" \
-            2>/dev/null  # 忽略无关警告
-          
-          # 3. 生成必需的头文件（asm-offsets.h）
-          make ARCH=$ARCH CC=$CC LD=$LD include/generated/asm-offsets.h -j2 2>/dev/null
-          
-          cd ..
-          echo "✅ 模块编译环境准备完成！无 VDSO 编译触发！"
-
-      - name: 补充 KPM 核心头文件
-        run: |
+          # 1. 先在 kernel-headers 中补充 kpm.h
           mkdir -p ./kernel-headers/linux
           chmod 777 ./kernel-headers/linux
           cat > ./kernel-headers/linux/kpm.h << EOF
@@ -142,36 +93,79 @@ jobs:
           void kpm_unregister_hooks(const struct kpm_hook *hooks, size_t num);
           #endif // __KPM_H__
           EOF
-          chmod 777 ./kernel-headers/linux/kpm.h
-
-      - name: 编译 HMA++ KPM 模块（最终构建）
-        run: |
-          export KERNELDIR=$(pwd)/kernel-src
-          export ARCH=${{ github.event.inputs.kernel_arch }}
           
-          # 工具链配置
+          # 2. 关键步骤：复制 kpm.h 到内核源码的 include/linux 目录（内核默认搜索路径）
+          cp -f ./kernel-headers/linux/kpm.h ./kernel-src/include/linux/
+          chmod 777 ./kernel-src/include/linux/kpm.h
+          
+          echo "✅ kpm.h 补充并复制到内核默认路径！"
+
+      - name: 配置内核
+        run: |
+          ARCH=${{ github.event.inputs.kernel_arch }}
+          cd ./kernel-src
+          
           export CC=clang
           export LD=ld.lld
           export OBJCOPY=objcopy
           export NM=nm
           
-          # 头文件路径+强制禁用 VDSO
+          # 生成配置并启用模块支持
+          make ARCH=$ARCH CC=$CC LD=$LD defconfig
+          cat >> .config << EOF
+          CONFIG_MODULES=y
+          CONFIG_MODULE_UNLOAD=y
+          CONFIG_MODULE_FORCE_LOAD=y
+          CONFIG_ANDROID=y
+          CONFIG_MODULE_SIG=n
+          CONFIG_LLVM=y
+          CONFIG_LLVM_IAS=y
+          CONFIG_RETPOLINE=y
+          CONFIG_STACKPROTECTOR=n
+          CONFIG_DEBUG_INFO=n
+          CONFIG_VDSO=n
+          CONFIG_VDSO32=n
+          CONFIG_COMPAT_VDSO=n
+          CONFIG_ARM64_VDSO=n
+          CONFIG_ARM64_COMPAT_VDSO=n
+          EOF
+          make ARCH=$ARCH CC=$CC LD=$LD oldconfig -j1 > /dev/null 2>&1
+          
+          # 准备模块编译环境和必需头文件
+          make ARCH=$ARCH CC=$CC LD=$LD modules_prepare -j2 2>/dev/null
+          make ARCH=$ARCH CC=$CC LD=$LD include/generated/asm-offsets.h -j2 2>/dev/null
+          
+          cd ..
+          echo "✅ 内核配置完成！"
+
+      - name: 编译 HMA++ KPM 模块（强化路径配置）
+        run: |
+          export KERNELDIR=$(pwd)/kernel-src
+          export ARCH=${{ github.event.inputs.kernel_arch }}
+          
+          # 工具链配置+强化头文件路径
+          export CC=clang
+          export LD=ld.lld
+          export OBJCOPY=objcopy
+          export NM=nm
+          
           if [ "$ARCH" = "arm64" ]; then
-            export EXTRA_CFLAGS="-I$(pwd)/kernel-headers -I$(pwd)/kernel-headers/linux -I$(pwd)/kernel-headers/arch-include -I$KERNELDIR/arch/arm64/include/generated -Wall -Wextra -O2 -fPIC -w -DKERNEL_5_15 -fno-pie -nostdinc -DCONFIG_VDSO=n"
+            # 明确包含 kernel-headers/linux 和内核自带的 include/linux 路径
+            export EXTRA_CFLAGS="-I$(pwd)/kernel-headers -I$(pwd)/kernel-headers/linux -I$KERNELDIR/include -I$KERNELDIR/include/linux -I$KERNELDIR/arch/arm64/include/generated -Wall -Wextra -O2 -fPIC -w -DKERNEL_5_15 -fno-pie -nostdinc -DCONFIG_VDSO=n"
           else
-            export EXTRA_CFLAGS="-I$(pwd)/kernel-headers -I$(pwd)/kernel-headers/linux -I$(pwd)/kernel-headers/arch-include -I$KERNELDIR/arch/arm/include/generated -Wall -Wextra -O2 -fPIC -w -DKERNEL_5_15 -fno-pie -nostdinc -DCONFIG_VDSO=n"
+            export EXTRA_CFLAGS="-I$(pwd)/kernel-headers -I$(pwd)/kernel-headers/linux -I$KERNELDIR/include -I$KERNELDIR/include/linux -I$KERNELDIR/arch/arm/include/generated -Wall -Wextra -O2 -fPIC -w -DKERNEL_5_15 -fno-pie -nostdinc -DCONFIG_VDSO=n"
           fi
           
           chmod 777 ./Makefile
           make clean || true
-          # 编译模块（仅编译模块，不依赖任何内核主体目标）
+          # 编译模块
           make -j2 V=1 CC=$CC LD=$LD OBJCOPY=$OBJCOPY || { echo "❌ 编译失败！"; exit 1; }
           
           # 验证模块生成
           if [ -f "./HMA++.ko" ]; then
             echo "🎉 HMA++ KPM 模块编译成功！"
             ls -la ./HMA++.ko
-            file ./HMA++.ko  # 确认模块格式正确
+            file ./HMA++.ko
           else
             echo "❌ 模块文件未生成！"
             exit 1
