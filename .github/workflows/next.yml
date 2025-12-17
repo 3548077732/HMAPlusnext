@@ -54,11 +54,13 @@ jobs:
           # 生成默认配置（适配对应架构）
           if [ "$ARCH" = "arm64" ]; then
             make ARCH=arm64 CROSS_COMPILE=aarch64-linux-android- defconfig
+            CROSS_COMPILE="aarch64-linux-android-"
           else
             make ARCH=arm CROSS_COMPILE=arm-linux-androideabi- defconfig
+            CROSS_COMPILE="arm-linux-androideabi-"
           fi
           # 启用模块支持（必需）
-          make ARCH=$ARCH CROSS_COMPILE=${{ github.event.inputs.kernel_arch == 'arm64' ? 'aarch64-linux-android-' : 'arm-linux-androideabi-' }} menuconfig
+          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE menuconfig
           # 强制开启模块加载支持（避免编译失败）
           sed -i 's/# CONFIG_MODULES is not set/CONFIG_MODULES=y/' .config
           sed -i 's/# CONFIG_MODULE_UNLOAD is not set/CONFIG_MODULE_UNLOAD=y/' .config
