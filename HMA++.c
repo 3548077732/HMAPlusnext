@@ -1,4 +1,4 @@
-
+// 新增：强制声明内核版本，兼容不同头文件版本
 #define LINUX_VERSION_CODE KERNEL_VERSION(4, 19, 0)
 #define KERNEL_VERSION(a,b,c) ((a)<<16 + (b)<<8 + (c))
 
