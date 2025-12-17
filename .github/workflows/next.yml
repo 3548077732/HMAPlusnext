@@ -27,36 +27,53 @@ jobs:
           sudo apt clean
           chmod -R 777 $(pwd)
 
-      - name: 下载 Android NDK r25c（LLVM 工具链适配）
+      - name: 下载 Android NDK r25c（动态匹配带版本后缀的编译器）
         run: |
           mkdir -p ./ndk
-          # 下载 NDK r25c（仅保留 LLVM 工具链，无需传统 GCC）
+          # 下载 NDK r25c
           wget -q https://dl.google.com/android/repository/android-ndk-r25c-linux.zip -O ndk.zip
           unzip -q -o ndk.zip -d ./ndk
           
-          # 动态查找 LLVM 工具链（NDK r25c 唯一工具链）
+          # 动态查找 LLVM 工具链目录
           NDK_ROOT=$(pwd)/ndk/android-ndk-r25c
-          # LLVM 预编译目录：匹配 linux-x86_64 架构（GitHub Actions 环境）
           LLVM_PREBUILT=$(find $NDK_ROOT/toolchains/llvm/prebuilt -name "linux-x86_64" -type d | head -n 1)
           LLVM_BIN=$LLVM_PREBUILT/bin
           
-          # 验证 LLVM 编译器存在（核心验证）
-          ARM64_CC="$LLVM_BIN/aarch64-linux-android-clang"
-          ARM32_CC="$LLVM_BIN/arm-linux-androideabi-clang"
-          if [ ! -f "$ARM64_CC" ] || [ ! -f "$ARM32_CC" ]; then
-            echo "❌ LLVM 编译器缺失！实际目录："
-            ls -la $LLVM_BIN
+          # 核心修复：动态匹配带 API 版本后缀的编译器，优先选最高版本（如 33）
+          if [ "${{ github.event.inputs.kernel_arch }}" = "arm64" ]; then
+            # 匹配 arm64 编译器：aarch64-linux-android*-clang，排序后取最高版本
+            ARM64_CC=$(ls $LLVM_BIN/aarch64-linux-android*-clang 2>/dev/null | sort -V | tail -n 1)
+          else
+            # 匹配 arm32 编译器：armv7a-linux-androideabi*-clang（日志中实际前缀是 armv7a-）
+            ARM32_CC=$(ls $LLVM_BIN/armv7a-linux-androideabi*-clang 2>/dev/null | sort -V | tail -n 1)
+          fi
+          
+          # 验证编译器存在
+          if [ "${{ github.event.inputs.kernel_arch }}" = "arm64" ] && [ -z "$ARM64_CC" ]; then
+            echo "❌ arm64 LLVM 编译器缺失！"
+            ls -la $LLVM_BIN/aarch64-linux-android*-clang 2>/dev/null
+            exit 1
+          elif [ "${{ github.event.inputs.kernel_arch }}" = "arm" ] && [ -z "$ARM32_CC" ]; then
+            echo "❌ arm32 LLVM 编译器缺失！"
+            ls -la $LLVM_BIN/armv7a-linux-androideabi*-clang 2>/dev/null
             exit 1
           fi
           
-          # 保存 LLVM 路径到环境变量
+          # 保存编译器路径和 LLVM 目录到环境变量
+          if [ "${{ github.event.inputs.kernel_arch }}" = "arm64" ]; then
+            echo "CC=$ARM64_CC" >> $GITHUB_ENV
+            echo "CROSS_COMPILE_PREFIX=$(echo $ARM64_CC | sed 's/-clang$//')-" >> $GITHUB_ENV
+          else
+            echo "CC=$ARM32_CC" >> $GITHUB_ENV
+            echo "CROSS_COMPILE_PREFIX=$(echo $ARM32_CC | sed 's/-clang$//')-" >> $GITHUB_ENV
+          fi
           echo "LLVM_BIN=$LLVM_BIN" >> $GITHUB_ENV
           echo "NDK_ROOT=$NDK_ROOT" >> $GITHUB_ENV
           
           chmod -R 777 ./ndk
           echo "✅ NDK r25c LLVM 工具链准备成功！"
-          echo "arm64 编译器：$ARM64_CC"
-          echo "arm32 编译器：$ARM32_CC"
+          echo "编译器路径：${{ env.CC }}"
+          echo "交叉编译前缀：${{ env.CROSS_COMPILE_PREFIX }}"
 
       - name: 克隆谷歌官方内核（android13-5.15 分支）
         run: |
@@ -86,20 +103,16 @@ jobs:
         run: |
           ARCH=${{ github.event.inputs.kernel_arch }}
           LLVM_BIN=${{ env.LLVM_BIN }}
+          CC=${{ env.CC }}
+          CROSS_COMPILE=${{ env.CROSS_COMPILE_PREFIX }}
           cd ./kernel-src
           
-          # 配置 LLVM 交叉编译器（Android 13 内核原生支持）
-          if [ "$ARCH" = "arm64" ]; then
-            export CROSS_COMPILE=$LLVM_BIN/aarch64-linux-android-
-            export CC=$LLVM_BIN/clang  # 明确指定 Clang 编译器
-            export LD=$LLVM_BIN/ld.lld
-          else
-            export CROSS_COMPILE=$LLVM_BIN/arm-linux-androideabi-
-            export CC=$LLVM_BIN/clang
-            export LD=$LLVM_BIN/ld.lld
-          fi
+          # 明确指定 LLVM 编译器和链接器
+          export CC=$CC
+          export LD=$LLVM_BIN/ld.lld
+          export CROSS_COMPILE=$CROSS_COMPILE
           
-          # 生成内核配置（指定 LLVM 工具链）
+          # 生成内核配置
           make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE CC=$CC LD=$LD defconfig
           
           # 开启模块支持+LLVM 编译兼容配置
@@ -109,8 +122,8 @@ jobs:
           sed -i 's/# CONFIG_RETPOLINE is not set/CONFIG_RETPOLINE=y/' .config
           sed -i 's/# CONFIG_ANDROID is not set/CONFIG_ANDROID=y/' .config
           sed -i 's/# CONFIG_MODULE_SIG is not set/CONFIG_MODULE_SIG=n/' .config
-          sed -i 's/# CONFIG_LLVM=y/CONFIG_LLVM=y/' .config  # 强制开启 LLVM 支持
-          sed -i 's/# CONFIG_LLVM_IAS=y/CONFIG_LLVM_IAS=y/' .config  # LLVM 内联汇编支持
+          sed -i 's/# CONFIG_LLVM=y/CONFIG_LLVM=y/' .config
+          sed -i 's/# CONFIG_LLVM_IAS=y/CONFIG_LLVM_IAS=y/' .config
           
           cd ..
 
@@ -150,30 +163,31 @@ jobs:
           export KERNELDIR=$(pwd)/kernel-src
           export ARCH=${{ github.event.inputs.kernel_arch }}
           LLVM_BIN=${{ env.LLVM_BIN }}
+          CC=${{ env.CC }}
+          CROSS_COMPILE=${{ env.CROSS_COMPILE_PREFIX }}
           
-          # 配置 LLVM 编译器路径
+          # 配置编译环境
+          export CC=$CC
+          export LD=$LLVM_BIN/ld.lld
+          export CROSS_COMPILE=$CROSS_COMPILE
+          
+          # 头文件路径
           if [ "$ARCH" = "arm64" ]; then
-            export CROSS_COMPILE=$LLVM_BIN/aarch64-linux-android-
-            export CC=$LLVM_BIN/clang
-            export LD=$LLVM_BIN/ld.lld
             export EXTRA_CFLAGS="-I$(pwd)/kernel-headers -I$(pwd)/kernel-headers/linux -I$(pwd)/kernel-headers/arch-include -I$KERNELDIR/arch/arm64/include/generated -Wall -Wextra -O2 -fPIC -w -DKERNEL_5_15 -fno-pie"
           else
-            export CROSS_COMPILE=$LLVM_BIN/arm-linux-androideabi-
-            export CC=$LLVM_BIN/clang
-            export LD=$LLVM_BIN/ld.lld
             export EXTRA_CFLAGS="-I$(pwd)/kernel-headers -I$(pwd)/kernel-headers/linux -I$(pwd)/kernel-headers/arch-include -I$KERNELDIR/arch/arm/include/generated -Wall -Wextra -O2 -fPIC -w -DKERNEL_5_15 -fno-pie"
           fi
           
-          # 验证编译器完整性
+          # 验证编译器
           if [ ! -f "$CC" ] || [ ! -f "$LD" ]; then
-            echo "❌ LLVM 编译器路径错误！"
+            echo "❌ 编译器路径错误！"
             exit 1
           fi
           
           chmod 777 ./Makefile
           make clean || true
-          # 强制使用 LLVM 编译，指定 CC/LD
-          make -j2 V=1 CC=$CC LD=$LD || { echo "❌ 编译失败！"; exit 1; }
+          # 编译模块
+          make -j2 V=1 CC=$CC LD=$LD CROSS_COMPILE=$CROSS_COMPILE || { echo "❌ 编译失败！"; exit 1; }
           
           # 验证模块生成
           if [ -f "./HMA++.ko" ]; then
