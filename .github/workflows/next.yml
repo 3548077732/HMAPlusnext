@@ -33,21 +33,21 @@ jobs:
           git clone --depth 1 -b android13-5.15 https://android.googlesource.com/kernel/common.git ./kernel-src
           [ ! -f "./kernel-src/Makefile" ] && { echo "❌ 内核源码克隆失败！"; exit 1; }
           
-          # 复制基础头文件+确保内核 include 目录权限
+          # 复制基础头文件+权限设置
           ARCH=${{ github.event.inputs.kernel_arch }}
           cp -r ./kernel-src/include ./kernel-headers/
           [ "$ARCH" = "arm64" ] && [ -d "./kernel-src/arch/arm64/include" ] && cp -r ./kernel-src/arch/arm64/include ./kernel-headers/arch-include
           [ "$ARCH" = "arm" ] && [ -d "./kernel-src/arch/arm/include" ] && cp -r ./kernel-src/arch/arm/include ./kernel-headers/arch-include
-          chmod -R 777 ./kernel-src/include  # 强制开放头文件目录权限
+          chmod -R 777 ./kernel-src/include ./kernel-src/arch
           
           echo "✅ 内核源码准备成功！"
 
-      - name: 修改内核 Makefile，剥离 VDSO 依赖
+      - name: 修改内核 Makefile，剥离 VDSO+禁用不兼容参数
         run: |
           ARCH=${{ github.event.inputs.kernel_arch }}
           cd ./kernel-src
           
-          # 删除 VDSO 相关依赖和 Makefile
+          # 1. 剥离 VDSO 依赖
           if [ "$ARCH" = "arm64" ]; then
             sed -i '/vdso_prepare/d' arch/arm64/Makefile
             rm -rf arch/arm64/kernel/vdso/Makefile
@@ -59,14 +59,18 @@ jobs:
           fi
           sed -i '/VDSO/d' Makefile
           sed -i '/vdso/d' Makefile
-          chmod -R 777 ./arch  # 确保修改后的 Makefile 可执行
           
-          echo "✅ VDSO 依赖剥离完成！"
+          # 2. 禁用 mbranch-protection（LLVM 不兼容）
+          sed -i 's/-mbranch-protection=pac-ret+leaf+bti//g' arch/$ARCH/Makefile
+          sed -i 's/-Wa,-march//g' arch/$ARCH/Makefile  # 移除截断的参数
+          
+          chmod -R 777 ./arch ./Makefile
+          echo "✅ VDSO 剥离+不兼容参数禁用完成！"
           cd ..
 
-      - name: 补充 kpm.h 并双重复制+强制验证（核心修复）
+      - name: 补充 kpm.h 并双重复制+强制验证
         run: |
-          # 1. 生成 kpm.h 文件
+          # 生成 kpm.h
           cat > ./kpm.h << EOF
           #ifndef __KPM_H__
           #define __KPM_H__
@@ -93,24 +97,17 @@ jobs:
           #endif // __KPM_H__
           EOF
           
-          # 2. 双重复制：同时放到内核 2 个核心头文件目录（100% 被找到）
-          cp -f ./kpm.h ./kernel-src/include/  # 路径1：直接放在 include 根目录，#include <kpm.h> 直接识别
-          cp -f ./kpm.h ./kernel-src/include/linux/  # 路径2：备份到 linux 子目录，双重保险
-          
-          # 3. 强制验证文件存在+权限（找不到直接终止，避免后续白跑）
+          # 双重复制+验证
+          cp -f ./kpm.h ./kernel-src/include/
+          cp -f ./kpm.h ./kernel-src/include/linux/
           if [ ! -f "./kernel-src/include/kpm.h" ] || [ ! -f "./kernel-src/include/linux/kpm.h" ]; then
-            echo "❌ kpm.h 复制失败！"
-            ls -la ./kernel-src/include/
-            ls -la ./kernel-src/include/linux/
-            exit 1
+            echo "❌ kpm.h 复制失败！"; exit 1;
           fi
-          chmod 777 ./kernel-src/include/kpm.h ./kernel-src/include/linux/kpm.h  # 强制可读
+          chmod 777 ./kernel-src/include/kpm.h ./kernel-src/include/linux/kpm.h
           
-          echo "✅ kpm.h 双重复制成功！已验证路径："
-          echo "1. ./kernel-src/include/kpm.h"
-          echo "2. ./kernel-src/include/linux/kpm.h"
+          echo "✅ kpm.h 准备完成！"
 
-      - name: 配置内核
+      - name: 配置内核（禁用不兼容选项）
         run: |
           ARCH=${{ github.event.inputs.kernel_arch }}
           cd ./kernel-src
@@ -120,7 +117,7 @@ jobs:
           export OBJCOPY=objcopy
           export NM=nm
           
-          # 生成配置并启用模块支持
+          # 生成配置+禁用不兼容功能
           make ARCH=$ARCH CC=$CC LD=$LD defconfig
           cat >> .config << EOF
           CONFIG_MODULES=y
@@ -138,40 +135,41 @@ jobs:
           CONFIG_COMPAT_VDSO=n
           CONFIG_ARM64_VDSO=n
           CONFIG_ARM64_COMPAT_VDSO=n
+          CONFIG_ARM64_PTR_AUTH=n  # 禁用 PAC 功能，避免 mbranch-protection 依赖
+          CONFIG_ARM64_BTI=n       # 禁用 BTI 功能，避免不兼容参数
           EOF
           make ARCH=$ARCH CC=$CC LD=$LD oldconfig -j1 > /dev/null 2>&1
           
-          # 准备模块编译环境和必需头文件
+          # 准备模块环境
           make ARCH=$ARCH CC=$CC LD=$LD modules_prepare -j2 2>/dev/null
           make ARCH=$ARCH CC=$CC LD=$LD include/generated/asm-offsets.h -j2 2>/dev/null
-          chmod -R 777 ./include/generated  # 确保生成的头文件可访问
+          chmod -R 777 ./include/generated
           
           cd ..
           echo "✅ 内核配置完成！"
 
-      - name: 编译 HMA++ KPM 模块（路径优先级置顶）
+      - name: 编译 HMA++ KPM 模块（完整参数+架构指定）
         run: |
           export KERNELDIR=$(pwd)/kernel-src
           export ARCH=${{ github.event.inputs.kernel_arch }}
           
-          # 工具链配置+EXTRA_CFLAGS 路径置顶（内核 include 目录优先）
+          # 工具链配置+完整参数传递
           export CC=clang
           export LD=ld.lld
           export OBJCOPY=objcopy
           export NM=nm
           
           if [ "$ARCH" = "arm64" ]; then
-            # 核心：把内核 include 和 include/linux 放在路径最前面，强制优先搜索
-            export EXTRA_CFLAGS="-I$KERNELDIR/include -I$KERNELDIR/include/linux -I$(pwd)/kernel-headers -I$KERNELDIR/arch/arm64/include/generated -Wall -Wextra -O2 -fPIC -w -DKERNEL_5_15 -fno-pie -nostdinc -DCONFIG_VDSO=n"
+            # 手动指定 -march=armv8-a（兼容 LLVM）+ 禁用不兼容选项+完整参数
+            export EXTRA_CFLAGS="-I$KERNELDIR/include -I$KERNELDIR/include/linux -I$(pwd)/kernel-headers -I$KERNELDIR/arch/arm64/include/generated -Wall -Wextra -O2 -fPIC -w -DKERNEL_5_15 -fno-pie -nostdinc -DCONFIG_VDSO=n -march=armv8-a -mgeneral-regs-only -fno-asynchronous-unwind-tables -fno-unwind-tables"
           else
-            export EXTRA_CFLAGS="-I$KERNELDIR/include -I$KERNELDIR/include/linux -I$(pwd)/kernel-headers -I$KERNELDIR/arch/arm/include/generated -Wall -Wextra -O2 -fPIC -w -DKERNEL_5_15 -fno-pie -nostdinc -DCONFIG_VDSO=n"
+            export EXTRA_CFLAGS="-I$KERNELDIR/include -I$KERNELDIR/include/linux -I$(pwd)/kernel-headers -I$KERNELDIR/arch/arm/include/generated -Wall -Wextra -O2 -fPIC -w -DKERNEL_5_15 -fno-pie -nostdinc -DCONFIG_VDSO=n -march=armv7-a -mgeneral-regs-only -fno-asynchronous-unwind-tables -fno-unwind-tables"
           fi
           
           chmod 777 ./Makefile
           make clean || true
-          # 编译模块+输出编译器路径日志，便于排查
-          echo "🔍 编译器搜索路径：$EXTRA_CFLAGS"
-          make -j2 V=1 CC=$CC LD=$LD OBJCOPY=$OBJCOPY || { echo "❌ 编译失败！"; exit 1; }
+          # 编译模块+强制打印完整命令（便于排查）
+          make -j1 V=1 CC=$CC LD=$LD OBJCOPY=$OBJCOPY EXTRA_CFLAGS="$EXTRA_CFLAGS" || { echo "❌ 编译失败！"; exit 1; }
           
           # 验证模块生成
           if [ -f "./HMA++.ko" ]; then
