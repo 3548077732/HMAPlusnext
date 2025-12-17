@@ -1,6 +1,6 @@
 name: Apatch KPM Build (Kernel 5.15+)
 on:
-  workflow_dispatch:  # 手动触发开关
+  workflow_dispatch:
     inputs:
       kernel_arch:
         description: "设备架构（arm64/arm）"
@@ -15,27 +15,27 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
-      # 1. 拉取代码
       - name: Checkout Code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1  # 优化拉取速度
 
-      # 2. 安装编译依赖
       - name: Install Dependencies
         run: |
-          sudo apt update
+          sudo apt update -y
           sudo apt install -y build-essential git wget gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf
+          sudo apt clean  # 清理缓存
 
-      # 3. 下载Apatch内核5.15+预编译头文件
       - name: Download Kernel 5.15+ Headers
         run: |
+          mkdir -p ./kernel-headers
           if [ "${{ github.event.inputs.kernel_arch }}" = "arm64" ]; then
-            wget https://github.com/apatch-project/apatch-kernel-headers/raw/main/headers-5.15-arm64.tar.gz -O kernel-headers.tar.gz
+            wget https://github.com/apatch-project/apatch-kernel-headers/raw/main/headers-5.15-arm64.tar.gz -O kernel-headers.tar.gz || exit 1
           else
-            wget https://github.com/apatch-project/apatch-kernel-headers/raw/main/headers-5.15-arm.tar.gz -O kernel-headers.tar.gz
+            wget https://github.com/apatch-project/apatch-kernel-headers/raw/main/headers-5.15-arm.tar.gz -O kernel-headers.tar.gz || exit 1
           fi
-          tar -zxvf kernel-headers.tar.gz -C ./kernel-headers
+          tar -zxvf kernel-headers.tar.gz -C ./kernel-headers || exit 1
 
-      # 4. 编译KPM模块
       - name: Build HMA++ KPM Module
         run: |
           export KERNELDIR=$(pwd)/kernel-headers
@@ -45,91 +45,15 @@ jobs:
           else
             export CROSS_COMPILE=arm-linux-gnueabihf-
           fi
-          make -j$(nproc)
+          make clean
+          make -j$(nproc) || exit 1
 
-      # 5. 上传编译产物（供下载）
       - name: Upload Build Output
         uses: actions/upload-artifact@v4
         with:
           name: HMA++-Next-KPM-${{ github.event.inputs.kernel_arch }}
           path: |
             HMA++.ko
-            .config
             Makefile
-          retention-days: 90  # 产物保留90天
-          cd /tmp/kpm
-          make -j$(nproc)
-          sudo make install
-          # 验证 KPM 安装
-          if ! command -v kpm &> /dev/null; then
-            echo "错误：KPM 工具安装失败！"
-            exit 1
-          fi
-          # 安装指定内核头文件（可选）
-          if [ -n "${{ github.event.inputs.kernel_version }}" ]; then
-            sudo apt install -y linux-headers-${{ github.event.inputs.kernel_version }}
-          fi
-
-      - name: ⚙️ 配置构建参数
-        run: |
-          # 调试模式添加 -g 编译选项
-          if [ "${{ github.event.inputs.build_mode }}" = "debug" ]; then
-            echo "EXTRA_CFLAGS=-g" >> $GITHUB_ENV
-          fi
-          # 指定 KPM 模块元信息（与代码中一致）
-          echo "KPM_NAME=HMA++ Next" >> $GITHUB_ENV
-          echo "KPM_VERSION=1.0.12" >> $GITHUB_ENV
-
-      - name: 🚀 编译内核模块（.ko）
-        run: |
-          make clean
-          # 多线程编译，适配 KPM 框架编译规则
-          make -j$(nproc) EXTRA_CFLAGS="${{ env.EXTRA_CFLAGS }}"
-          # 验证 .ko 文件生成
-          if [ ! -f "HMA++.ko" ]; then
-            echo "错误：内核模块编译失败！"
-            exit 1
-          fi
-          modinfo HMA++.ko  # 输出模块信息，验证合法性
-
-      - name: 📦 打包为 KPM 模块（核心步骤）
-        run: |
-          # 使用 KPM 工具打包 .ko 为 .kpm（符合 KPM 加载规范）
-          kpm pack \
-            --name "${{ env.KPM_NAME }}" \
-            --version "${{ env.KPM_VERSION }}" \
-            --author "NightFallsLikeRain" \
-            --license "GPLv3" \
-            --description "全应用风险+广告拦截（含微信/QQ/银行/系统软件白名单）" \
-            --input "HMA++.ko" \
-            --output "HMA++_Next_${{ github.event.inputs.build_mode }}.kpm"
-          # 验证 KPM 文件生成
-          if [ ! -f "HMA++_Next_${{ github.event.inputs.build_mode }}.kpm" ]; then
-            echo "错误：KPM 模块打包失败！"
-            exit 1
-          fi
-          # 输出 KPM 模块信息
-          kpm info "HMA++_Next_${{ github.event.inputs.build_mode }}.kpm"
-
-      - name: 📤 上传 KPM 产物
-        uses: actions/upload-artifact@v4
-        with:
-          name: HMA++-Next-KPM-${{ github.event.inputs.build_mode }}
-          path: |
-            HMA++_Next_${{ github.event.inputs.build_mode }}.kpm  # 核心KPM产物
-            HMA++.ko  # 保留原始.ko，便于备用
-            Makefile  # 构建配置文件
-          retention-days: 90  # 产物保留90天，满足长期使用需求
-          if-no-files-found: error  # 无产物时标记构建失败
-
-      - name: 📝 构建报告（含使用说明）
-        run: |
-          echo "========================================"
-          echo "✅ KPM 模块构建完成！"
-          echo "📌 构建模式：${{ github.event.inputs.build_mode }}"
-          echo "📌 内核版本：${{ github.event.inputs.kernel_version || '默认（'$(uname -r)')' }}"
-          echo "📌 产物名称：HMA++_Next_${{ github.event.inputs.build_mode }}.kpm"
-          echo "📌 加载命令：kpm load HMA++_Next_${{ github.event.inputs.build_mode }}.kpm"
-          echo "📌 控制命令：echo '1,1' > /proc/kpmctl/HMA++ Next"
-          echo "📌 日志查看：dmesg | grep [HMA++]"
-          echo "========================================"
+          retention-days: 90
+        if: success()  # 仅编译成功时上传
