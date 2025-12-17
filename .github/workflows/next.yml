@@ -1,4 +1,4 @@
-name: Apatch KPM Build (Kernel 5.15+)
+name: HMA++ KPM Build (KernelPatch Toolchain)
 on:
   workflow_dispatch:
     inputs:
@@ -15,216 +15,73 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
-      - name: Checkout Code
+      - name: Checkout HMA++ 源码
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      - name: 安装终极工具链（补全所有隐性依赖）
+      - name: 安装基础依赖
         run: |
           sudo apt update -y
-          # 安装所有可能缺失的依赖，包括交叉编译相关
-          sudo apt install -y build-essential git flex bison bc libssl-dev libelf-dev dwarves clang llvm lld binutils gcc libc6-dev crossbuild-essential-arm64 crossbuild-essential-armhf
+          sudo apt install -y git wget unzip build-essential clang llvm lld binutils
           sudo apt clean
           chmod -R 777 $(pwd)
 
-      - name: 克隆谷歌官方内核（android13-5.15 分支）
+      - name: 克隆 KernelPatch 构建工具
         run: |
-          mkdir -p ./kernel-src ./kernel-headers
-          git clone --depth 1 -b android13-5.15 https://android.googlesource.com/kernel/common.git ./kernel-src
-          [ ! -f "./kernel-src/Makefile" ] && { echo "❌ 内核源码克隆失败！"; exit 1; }
-          
-          # 全目录权限+头文件复制
-          ARCH=${{ github.event.inputs.kernel_arch }}
-          cp -r ./kernel-src/include ./kernel-headers/
-          [ "$ARCH" = "arm64" ] && [ -d "./kernel-src/arch/arm64/include" ] && cp -r ./kernel-src/arch/arm64/include ./kernel-headers/arch-include
-          [ "$ARCH" = "arm" ] && [ -d "./kernel-src/arch/arm/include" ] && cp -r ./kernel-src/arch/arm/include ./kernel-headers/arch-include
-          chmod -R 777 ./kernel-src
-          
-          echo "✅ 内核源码准备成功！"
+          # 克隆官方 KPM 构建工具
+          git clone --depth 1 https://github.com/bmax121/KernelPatch.git ./KernelPatch
+          chmod -R 777 ./KernelPatch
+          echo "✅ KernelPatch 工具克隆成功！"
 
-      - name: 极简 Makefile 修改（仅保留核心兼容）
+      - name: 配置 KPM 构建环境（自动处理内核依赖）
         run: |
-          ARCH=${{ github.event.inputs.kernel_arch }}
-          cd ./kernel-src
-          
-          # 1. 剥离 VDSO 依赖
-          if [ "$ARCH" = "arm64" ]; then
-            sed -i '/vdso_prepare/d' arch/arm64/Makefile
-            rm -rf arch/arm64/kernel/vdso/Makefile
-            echo -e "all:\nclean:" > arch/arm64/kernel/vdso/Makefile
-          else
-            sed -i '/vdso_prepare/d' arch/arm/Makefile
-            rm -rf arch/arm/kernel/vdso/Makefile
-            echo -e "all:\nclean:" > arch/arm/kernel/vdso/Makefile
-          fi
-          
-          # 2. 禁用所有不兼容参数（彻底清空架构编译参数）
-          sed -i '/-mbranch-protection/d' arch/$ARCH/Makefile
-          sed -i '/-Wa,-march/d' arch/$ARCH/Makefile
-          sed -i '/CCFLAGS/s/=.*/= -w -O2/' arch/$ARCH/Makefile  # 清空并设置基础参数
-          
-          chmod -R 777 ./arch ./Makefile ./scripts
-          echo "✅ Makefile 极简修改完成！"
+          # 进入工具目录，配置环境
+          cd ./KernelPatch
+          # 下载对应架构的 NDK 工具链（工具自动适配）
+          ./tools/download_ndk.sh ${{ github.event.inputs.kernel_arch }}
+          # 生成 KPM 构建配置（自动关联内核头文件和工具链）
+          ./tools/gen_kpm_config.sh ${{ github.event.inputs.kernel_arch }} ../
           cd ..
+          echo "✅ KPM 构建环境配置完成！"
 
-      - name: 补充 kpm.h 并验证
+      - name: 补充 HMA++ 模块配置（适配 KernelPatch）
         run: |
-          cat > ./kpm.h << EOF
-          #ifndef __KPM_H__
-          #define __KPM_H__
-          #include <linux/types.h>
-          #include <linux/list.h>
-          typedef void (*kpm_hook_func_t)(void *args, void *udata);
-          struct kpm_hook {
-              int syscall;
-              kpm_hook_func_t func;
-              void *udata;
-              struct list_head list;
-          };
-          #define hook_fargs1_t struct { void *args[1]; }
-          #define hook_fargs4_t struct { void *args[4]; }
-          #define hook_fargs5_t struct { void *args[5]; }
-          #define KPM_HOOK(syscall, func, udata) { \
-              .syscall = syscall, \
-              .func = (kpm_hook_func_t)func, \
-              .udata = udata, \
-              .list = LIST_HEAD_INIT((((struct kpm_hook *)0)->list)), \
-          }
-          int kpm_register_hooks(const struct kpm_hook *hooks, size_t num);
-          void kpm_unregister_hooks(const struct kpm_hook *hooks, size_t num);
-          #endif // __KPM_H__
+          # 创建 KernelPatch 兼容的 Makefile（工具自动识别）
+          cat > ./Makefile << EOF
+          # KernelPatch KPM 构建规则（无需手动配置内核路径）
+          include ./KernelPatch/kpm.mk
+          
+          # 模块信息
+          MODULE_NAME := HMA++
+          MODULE_AUTHOR := NightFallsLikeRain
+          MODULE_DESCRIPTION := "HMA++ Next: 基于白名单的应用文件操作拦截 KPM 模块"
+          MODULE_LICENSE := GPL-3.0
+          
+          # 源码文件
+          SRC_FILES := HMA++.c
+          
+          # 编译选项（工具自动注入内核头文件路径）
+          EXTRA_CFLAGS += -Wall -O2 -fPIC -w -DKERNEL_5_15 -fno-pie
           EOF
           
-          cp -f ./kpm.h ./kernel-src/include/
-          cp -f ./kpm.h ./kernel-src/include/linux/
-          [ ! -f "./kernel-src/include/kpm.h" ] && { echo "❌ kpm.h 复制失败！"; exit 1; }
-          chmod 777 ./kernel-src/include/kpm.h ./kernel-src/include/linux/kpm.h
-          
-          echo "✅ kpm.h 准备完成！"
+          # 确保 HMA++.c 存在（用户需自行保证源码在根目录）
+          [ ! -f "./HMA++.c" ] && { echo "❌ 未找到 HMA++.c 源码文件！"; exit 1; }
+          chmod 777 ./Makefile ./HMA++.c
+          echo "✅ 模块配置完成！"
 
-      - name: 超极简内核配置（仅保留模块核心）
+      - name: 编译 HMA++ KPM 模块（KernelPatch 自动构建）
         run: |
-          ARCH=${{ github.event.inputs.kernel_arch }}
-          cd ./kernel-src
+          # 直接调用 make，KernelPatch 自动处理所有依赖
+          make -j2 V=1 || { echo "❌ 模块编译失败！"; exit 1; }
           
-          # 工具链配置（显式指定目标架构）
-          export CC=clang
-          export LD=ld.lld
-          export OBJCOPY=objcopy
-          export NM=nm
-          export HOSTCC=gcc
-          # 显式设置目标架构（关键！之前缺失）
-          [ "$ARCH" = "arm64" ] && export TARGET=aarch64-linux-gnu || export TARGET=arm-linux-gnueabihf
-          
-          # 生成超极简配置（仅模块必需，其他全禁）
-          make ARCH=$ARCH CC=$CC LD=$LD HOSTCC=$HOSTCC defconfig
-          cat >> .config << EOF
-          # 模块核心（仅这几个必需）
-          CONFIG_MODULES=y
-          CONFIG_MODULE_UNLOAD=y
-          CONFIG_MODULE_FORCE_LOAD=y
-          CONFIG_MODULE_SIG=n
-          CONFIG_MODULE_COMPRESS=n
-          CONFIG_MODVERSIONS=n  # 彻底禁用模块版本检查，避免依赖 scripts/mod
-          CONFIG_MODULE_SRCVERSION_ALL=n
-          CONFIG_MODULE_ALLOW_MISSING_NAMESPACE_IMPORTS=y
-          
-          # 系统基础
-          CONFIG_ANDROID=y
-          CONFIG_RETPOLINE=y
-          CONFIG_MMU=y
-          CONFIG_64BIT=$([ "$ARCH" = "arm64" ] && echo y || echo n)
-          
-          # LLVM 兼容
-          CONFIG_LLVM=y
-          CONFIG_LLVM_IAS=y
-          
-          # 禁用所有其他功能
-          CONFIG_STACKPROTECTOR=n
-          CONFIG_DEBUG_INFO=n
-          CONFIG_VDSO=n
-          CONFIG_ARM64_PTR_AUTH=n
-          CONFIG_ARM64_BTI=n
-          CONFIG_DEBUG_KERNEL=n
-          CONFIG_SECURITY=n
-          CONFIG_TRACING=n
-          CONFIG_KASAN=n
-          CONFIG_KCSAN=n
-          CONFIG_SIGNED_MODULES=n
-          CONFIG_COMPAT=n  # 禁用兼容模式，减少依赖
-          EOF
-          make ARCH=$ARCH CC=$CC LD=$LD HOSTCC=$HOSTCC oldconfig -j1 > /dev/null 2>&1
-          
-          echo "✅ 超极简内核配置完成！"
-          cd ..
-
-      - name: 编译 scripts/mod 必需文件（精准编译，不冗余）
-        run: |
-          ARCH=${{ github.event.inputs.kernel_arch }}
-          cd ./kernel-src
-          
-          # 工具链配置（显式指定目标架构）
-          export CC=clang
-          export LD=ld.lld
-          export OBJCOPY=objcopy
-          export NM=nm
-          export HOSTCC=gcc
-          [ "$ARCH" = "arm64" ] && { export TARGET=aarch64-linux-gnu; export CFLAGS="-target aarch64-linux-gnu"; } || { export TARGET=arm-linux-gnueabihf; export CFLAGS="-target arm-linux-gnueabihf"; }
-          
-          # 精准编译 scripts/mod 必需文件（empty.o + modpost 核心）
-          # 1. 编译 empty.o（模块模板文件）
-          $CC $CFLAGS -c scripts/mod/empty.c -o scripts/mod/empty.o \
-            -I./include -I./arch/$ARCH/include -I./include/generated \
-            -mgeneral-regs-only -fno-asynchronous-unwind-tables -fno-unwind-tables -w -O2
-          
-          # 2. 编译 modpost 相关（模块符号处理，必需）
-          HOSTCC=gcc $HOSTCC -c scripts/mod/modpost.c -o scripts/mod/modpost.o \
-            -I./include -w -O2
-          HOSTCC=gcc $HOSTCC -c scripts/mod/file2alias.c -o scripts/mod/file2alias.o \
-            -I./include -w -O2
-          HOSTCC=gcc $HOSTCC -c scripts/mod/sumversion.c -o scripts/mod/sumversion.o \
-            -I./include -w -O2
-          HOSTCC=gcc $HOSTCC scripts/mod/modpost.o scripts/mod/file2alias.o scripts/mod/sumversion.o -o scripts/mod/modpost
-          
-          # 3. 生成模块链接脚本
-          make ARCH=$ARCH CC=$CC LD=$LD HOSTCC=$HOSTCC scripts/module.lds -j1 2>/dev/null
-          
-          # 4. 完成模块准备
-          make ARCH=$ARCH CC=$CC LD=$LD HOSTCC=$HOSTCC include/generated/asm-offsets.h -j1 2>/dev/null
-          
-          chmod -R 777 ./scripts/mod ./include
-          echo "✅ scripts/mod 必需文件编译成功！"
-          cd ..
-
-      - name: 编译 HMA++ KPM 模块（终极构建）
-        run: |
-          export KERNELDIR=$(pwd)/kernel-src
-          export ARCH=${{ github.event.inputs.kernel_arch }}
-          
-          # 工具链配置（显式目标架构）
-          export CC=clang
-          export LD=ld.lld
-          export OBJCOPY=objcopy
-          export NM=nm
-          export HOSTCC=gcc
-          [ "$ARCH" = "arm64" ] && export EXTRA_CFLAGS="-target aarch64-linux-gnu" || export EXTRA_CFLAGS="-target arm-linux-gnueabihf"
-          
-          # 核心编译参数（极简+明确）
-          export EXTRA_CFLAGS="$EXTRA_CFLAGS -I$KERNELDIR/include -I$KERNELDIR/include/linux -I$(pwd)/kernel-headers -I$KERNELDIR/arch/$ARCH/include/generated -Wall -O2 -fPIC -w -DKERNEL_5_15 -fno-pie -nostdinc -mgeneral-regs-only -fno-asynchronous-unwind-tables -fno-unwind-tables"
-          
-          chmod 777 ./Makefile
-          make clean || true
-          # 终极编译（显式所有参数）
-          make -j1 V=1 CC=$CC LD=$LD OBJCOPY=$OBJCOPY NM=$NM HOSTCC=$HOSTCC EXTRA_CFLAGS="$EXTRA_CFLAGS" || { echo "❌ 模块编译失败！"; exit 1; }
-          
-          # 验证模块
+          # 验证模块生成
           if [ -f "./HMA++.ko" ]; then
             echo "🎉 HMA++ KPM 模块编译成功！"
             ls -la ./HMA++.ko
             file ./HMA++.ko
           else
-            echo "❌ 模块未生成！"
+            echo "❌ 模块文件未生成！"
             exit 1
           fi
           chmod 777 ./HMA++.ko
