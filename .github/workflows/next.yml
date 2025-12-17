@@ -27,7 +27,7 @@ jobs:
           sudo apt clean
           chmod -R 777 $(pwd)
 
-      - name: 下载 Android NDK r25c（动态匹配编译器）
+      - name: 下载 Android NDK r25c（修正工具链前缀）
         run: |
           mkdir -p ./ndk
           wget -q https://dl.google.com/android/repository/android-ndk-r25c-linux.zip -O ndk.zip
@@ -38,34 +38,33 @@ jobs:
           LLVM_PREBUILT=$(find $NDK_ROOT/toolchains/llvm/prebuilt -name "linux-x86_64" -type d | head -n 1)
           LLVM_BIN=$LLVM_PREBUILT/bin
           
-          # 匹配对应架构的编译器（取最高 API 版本）
+          # 核心修复：提取不带 API 版本的工具链前缀（如 aarch64-linux-android-）
           if [ "${{ github.event.inputs.kernel_arch }}" = "arm64" ]; then
+            # 匹配编译器并提取基础前缀（去掉 API 版本和 -clang）
             ARM64_CC=$(ls $LLVM_BIN/aarch64-linux-android*-clang 2>/dev/null | sort -V | tail -n 1)
             [ -z "$ARM64_CC" ] && { echo "❌ arm64 编译器缺失！"; exit 1; }
-            export CC=$ARM64_CC
-            export CROSS_PREFIX=$(echo $ARM64_CC | sed 's/-clang$//')-
+            CROSS_PREFIX=$(echo $ARM64_CC | sed -E 's/([aarch64-linux-android]-)[0-9]+-clang$/\1/')
           else
             ARM32_CC=$(ls $LLVM_BIN/armv7a-linux-androideabi*-clang 2>/dev/null | sort -V | tail -n 1)
             [ -z "$ARM32_CC" ] && { echo "❌ arm32 编译器缺失！"; exit 1; }
-            export CC=$ARM32_CC
-            export CROSS_PREFIX=$(echo $ARM32_CC | sed 's/-clang$//')-
+            CROSS_PREFIX=$(echo $ARM32_CC | sed -E 's/([armv7a-linux-androideabi]-)[0-9]+-clang$/\1/')
           fi
           
-          # 保存环境变量
-          echo "CC=$CC" >> $GITHUB_ENV
+          # 保存关键环境变量（编译器+工具链前缀+LLVM 工具路径）
+          echo "CC=$ARM64_CC" >> $GITHUB_ENV
           echo "CROSS_PREFIX=$CROSS_PREFIX" >> $GITHUB_ENV
           echo "LLVM_BIN=$LLVM_BIN" >> $GITHUB_ENV
           echo "NDK_ROOT=$NDK_ROOT" >> $GITHUB_ENV
           
           chmod -R 777 ./ndk
-          echo "✅ 编译器准备成功：$CC"
+          echo "✅ 工具链准备成功："
+          echo "编译器：$ARM64_CC"
+          echo "交叉编译前缀：$CROSS_PREFIX"
 
       - name: 克隆谷歌官方内核（android13-5.15 分支）
         run: |
           mkdir -p ./kernel-src ./kernel-headers
           git clone --depth 1 -b android13-5.15 https://android.googlesource.com/kernel/common.git ./kernel-src
-          
-          # 验证内核源码完整性
           [ ! -f "./kernel-src/Makefile" ] && { echo "❌ 内核源码克隆失败！"; exit 1; }
           
           # 复制基础头文件
@@ -77,7 +76,7 @@ jobs:
           chmod -R 777 ./kernel-src ./kernel-headers
           echo "✅ 内核源码准备成功！"
 
-      - name: 配置内核（完整流程：defconfig → prepare → modules_prepare）
+      - name: 配置内核（禁用 VDSO+显式指定 LLVM 工具）
         run: |
           ARCH=${{ github.event.inputs.kernel_arch }}
           CC=${{ env.CC }}
@@ -85,15 +84,19 @@ jobs:
           LLVM_BIN=${{ env.LLVM_BIN }}
           cd ./kernel-src
           
-          # 配置编译器和链接器
+          # 配置编译器+LLVM 工具（显式指定 objcopy/nm/objdump 为 LLVM 工具）
           export CC=$CC
           export LD=$LLVM_BIN/ld.lld
           export CROSS_COMPILE=$CROSS_PREFIX
+          export OBJCOPY=$LLVM_BIN/llvm-objcopy
+          export NM=$LLVM_BIN/llvm-nm
+          export OBJDUMP=$LLVM_BIN/llvm-objdump
+          export STRIP=$LLVM_BIN/llvm-strip
           
           # 1. 生成默认配置
           make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE CC=$CC LD=$LD defconfig
           
-          # 2. 开启必需配置
+          # 2. 关键配置：禁用 VDSO（避免工具依赖）+ 启用模块支持
           sed -i 's/# CONFIG_MODULES is not set/CONFIG_MODULES=y/' .config
           sed -i 's/# CONFIG_MODULE_UNLOAD is not set/CONFIG_MODULE_UNLOAD=y/' .config
           sed -i 's/# CONFIG_MODULE_FORCE_LOAD is not set/CONFIG_MODULE_FORCE_LOAD=y/' .config
@@ -102,12 +105,11 @@ jobs:
           sed -i 's/# CONFIG_MODULE_SIG is not set/CONFIG_MODULE_SIG=n/' .config
           sed -i 's/# CONFIG_LLVM=y/CONFIG_LLVM=y/' .config
           sed -i 's/# CONFIG_LLVM_IAS=y/CONFIG_LLVM_IAS=y/' .config
-          # 禁用栈保护（避免 mstack-protector-guard-offset 错误）
           sed -i 's/CONFIG_STACKPROTECTOR=y/# CONFIG_STACKPROTECTOR is not set/' .config
+          sed -i 's/# CONFIG_VDSO is not set/CONFIG_VDSO=n/' .config  # 禁用 VDSO，避免工具缺失错误
           
-          # 3. 生成核心头文件（关键步骤，之前遗漏）
+          # 3. 生成核心头文件+模块编译环境
           make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE CC=$CC LD=$LD prepare -j2
-          # 4. 准备模块编译环境（生成模块必需的依赖文件）
           make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE CC=$CC LD=$LD modules_prepare -j2
           
           cd ..
@@ -151,8 +153,11 @@ jobs:
           export CC=${{ env.CC }}
           export LD=${{ env.LLVM_BIN }}/ld.lld
           export CROSS_COMPILE=${{ env.CROSS_PREFIX }}
+          export OBJCOPY=${{ env.LLVM_BIN }}/llvm-objcopy
+          export NM=${{ env.LLVM_BIN }}/llvm-nm
+          export OBJDUMP=${{ env.LLVM_BIN }}/llvm-objdump
           
-          # 头文件路径+编译器兼容选项
+          # 头文件路径+兼容选项
           if [ "$ARCH" = "arm64" ]; then
             export EXTRA_CFLAGS="-I$(pwd)/kernel-headers -I$(pwd)/kernel-headers/linux -I$(pwd)/kernel-headers/arch-include -I$KERNELDIR/arch/arm64/include/generated -Wall -Wextra -O2 -fPIC -w -DKERNEL_5_15 -fno-pie -nostdinc"
           else
@@ -161,8 +166,8 @@ jobs:
           
           chmod 777 ./Makefile
           make clean || true
-          # 编译模块（显式指定所有工具链参数）
-          make -j2 V=1 CC=$CC LD=$LD CROSS_COMPILE=$CROSS_COMPILE || { echo "❌ 编译失败！"; exit 1; }
+          # 编译模块（显式传递所有工具链参数）
+          make -j2 V=1 CC=$CC LD=$LD CROSS_COMPILE=$CROSS_COMPILE OBJCOPY=$OBJCOPY NM=$NM OBJDUMP=$OBJDUMP || { echo "❌ 编译失败！"; exit 1; }
           
           # 验证模块生成
           if [ -f "./HMA++.ko" ]; then
