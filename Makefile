@@ -1,39 +1,29 @@
-# 纯手动编译 Makefile（修复 NDK sysroot 路径，适配 Android 13-5.15+）
-MODULE_NAME := HMA++
-OBJ_NAME := $(MODULE_NAME).o
-KO_NAME := $(MODULE_NAME).ko
-KPM_NAME := $(MODULE_NAME).kpm
+TARGET_COMPILE=./arm-gnu-toolchain-14.2.rel1-x86_64-aarch64-none-elf/bin/aarch64-none-elf-
 KP_DIR = ./KernelPatch
 
-# 工具链配置（从 GitHub Actions 环境变量读取，路径修正）
-NDK_ROOT ?= ./android-ndk-r25c
-TOOLCHAIN := $(NDK_ROOT)/toolchains/llvm/prebuilt/linux-x86_64
-CC := $(TOOLCHAIN)/bin/aarch64-linux-android24-clang
-LD := $(TOOLCHAIN)/bin/ld.lld
-# 关键修正：sysroot 在工具链目录下，而非 NDK 根目录
-KERNELDIR := $(TOOLCHAIN)/sysroot
+CC = $(TARGET_COMPILE)gcc
+LD = $(TARGET_COMPILE)ld
 
-# 头文件路径（基于修正后的 sysroot，覆盖所有依赖）
-INCLUDES := -I./kernel-headers \
-            -I./kernel-headers/arch-arm64 \
-            -I./kernel-headers/arch-arm64/asm \
-            -I./kernel-headers/linux \
-            -I./kernel-headers/asm-generic \
-            -I./kernel-headers/uapi \
-            -I$(KERNELDIR)/usr/include \
-            -I$(KERNELDIR)/usr/include/aarch64-linux-android \
-            -I$(NDK_ROOT)/sysroot/usr/include \
-            -I$(NDK_ROOT)/sysroot/usr/include/aarch64-linux-android
+INCLUDE_DIRS := . include patch/include linux/include linux/arch/arm64/include linux/tools/arch/arm64/include
 
-# 编译选项（适配 5.15+ 内核 + LLVM，添加 KPM 头文件路径）
-EXTRA_CFLAGS := $(INCLUDES) \
-                -target aarch64-linux-android \
-                -DKERNEL_5_15 \
-                -D__KERNEL__ \
-                -DMODULE \
-                -Wall -O2 -fPIC -w \
-                -fno-pie -fno-asynchronous-unwind-tables \
-                -mgeneral-regs-only -march=armv8-a \
+INCLUDE_FLAGS := $(foreach dir,$(INCLUDE_DIRS),-I$(KP_DIR)/kernel/$(dir))
+
+CFLAGS = -I$(AP_INCLUDE_PATH) $(INCLUDE_FLAGS) -Wall -Ofast -fno-PIC -fno-asynchronous-unwind-tables -fno-stack-protector -fno-unwind-tables -fno-semantic-interposition -U_FORTIFY_SOURCE -fno-common -fvisibility=hidden
+
+objs := HMA++.o
+
+all: HMA++.kpm
+
+HMA++.kpm: ${objs}
+	${CC} -r -o $@ $^
+
+%.o: %.c
+	${CC} $(CFLAGS) $(INCLUDE_FLAGS) -c -O2 -o $@ $<
+
+.PHONY: clean
+clean:
+	rm -rf *.kpm
+	find . -name "*.o" | xargs rm -f
                 -nostdinc -fno-common \
                 -Wno-implicit-function-declaration \
                 -Wno-incompatible-pointer-types \
