@@ -23,29 +23,28 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt update -y
-          sudo apt install -y build-essential git wget gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf
+          sudo apt install -y build-essential git wget unzip gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf
           sudo apt clean
 
-      - name: Download Android 5.15+ Kernel Headers（替代源）
+      - name: Download & Extract NDK r25c（修复路径匹配）
         run: |
-          mkdir -p ./kernel-headers
-          # 替换为 LineageOS 预编译头文件（支持 5.15+ 内核，稳定可靠）
+          mkdir -p ./ndk ./kernel-headers
+          # 下载完整 NDK 并解压（避免单独解压目录失败）
+          wget https://dl.google.com/android/repository/android-ndk-r25c-linux.zip -O ndk.zip
+          unzip -q ndk.zip -d ./ndk  # 解压整个 NDK 到 ndk 目录
+          # 复制完整的头文件目录到 kernel-headers（确保路径正确）
+          cp -r ./ndk/android-ndk-r25c/sysroot/usr/include ./kernel-headers/
+          # 复制 NDK 中的 asm 头文件（解决架构相关头文件缺失）
           if [ "${{ github.event.inputs.kernel_arch }}" = "arm64" ]; then
-            # ARM64 头文件（适配 Android 5.15+ 内核）
-            wget https://dl.google.com/android/repository/android-ndk-r25c-linux.zip -O ndk.zip
-            unzip -q ndk.zip android-ndk-r25c/sysroot/usr/include/ -d ./
-            mv ./android-ndk-r25c/sysroot/usr/include ./kernel-headers/
+            cp -r ./ndk/android-ndk-r25c/sysroot/usr/include/aarch64-linux-android/asm ./kernel-headers/include/
           else
-            # ARM32 头文件
-            wget https://dl.google.com/android/repository/android-ndk-r25c-linux.zip -O ndk.zip
-            unzip -q ndk.zip android-ndk-r25c/sysroot/usr/include/ -d ./
-            mv ./android-ndk-r25c/sysroot/usr/include ./kernel-headers/
+            cp -r ./ndk/android-ndk-r25c/sysroot/usr/include/arm-linux-androideabi/asm ./kernel-headers/include/
           fi
-          rm -rf android-ndk-r25c ndk.zip  # 清理临时文件
+          rm -rf ndk.zip ./ndk  # 清理临时文件
 
-      - name: 补充 KPM 必需头文件（避免缺失）
+      - name: 补充 KPM 必需头文件
         run: |
-          # 手动添加 Apatch KPM 核心头文件（直接写入本地，无需依赖外部仓库）
+          mkdir -p ./kernel-headers/linux  # 确保目录存在
           cat > ./kernel-headers/linux/kpm.h << EOF
           #ifndef __KPM_H__
           #define __KPM_H__
@@ -72,18 +71,19 @@ jobs:
           #endif // __KPM_H__
           EOF
 
-      - name: Build HMA++ KPM Module
+      - name: Build HMA++ KPM Module（适配 NDK 工具链）
         run: |
           export KERNELDIR=$(pwd)/kernel-headers
           export ARCH=${{ github.event.inputs.kernel_arch }}
-          # 适配 NDK 交叉编译器路径
+          # 使用 NDK 自带工具链（避免系统工具链版本不兼容）
+          NDK_TOOLCHAIN=$(pwd)/kernel-headers/../ndk/android-ndk-r25c/toolchains
           if [ "$ARCH" = "arm64" ]; then
-            export CROSS_COMPILE=aarch64-linux-android-
+            export CROSS_COMPILE=$NDK_TOOLCHAIN/aarch64-linux-android-4.9/prebuilt/linux-x86_64/bin/aarch64-linux-android-
           else
-            export CROSS_COMPILE=arm-linux-androideabi-
+            export CROSS_COMPILE=$NDK_TOOLCHAIN/arm-linux-androideabi-4.9/prebuilt/linux-x86_64/bin/arm-linux-androideabi-
           fi
-          # 强制指定头文件路径，确保无缺失
-          export EXTRA_CFLAGS="-I$(pwd)/kernel-headers -I$(pwd)/kernel-headers/linux -I$(pwd)/kernel-headers/asm-generic"
+          # 强制指定头文件路径，覆盖系统路径
+          export EXTRA_CFLAGS="-I$KERNELDIR/include -I$KERNELDIR/include/linux -I$KERNELDIR/include/asm -Wall -Wextra -O2"
           make clean
           make -j$(nproc) || { echo "编译失败！"; exit 1; }
 
@@ -92,7 +92,7 @@ jobs:
         with:
           name: HMA++-Next-KPM-${{ github.event.inputs.kernel_arch }}
           path: |
-            HMA++.ko
+            HMA++.ko  # 确保模块文件名与 Makefile 一致
             Makefile
           retention-days: 90
         if: success()
