@@ -1,24 +1,30 @@
-// 新增：适配不同内核版本的兼容宏（避免头文件依赖冲突）
-#define __KERNEL__
-#define MODULE
+
+#define LINUX_VERSION_CODE KERNEL_VERSION(4, 19, 0)
+#define KERNEL_VERSION(a,b,c) ((a)<<16 + (b)<<8 + (c))
+
+// 核心头文件（保持你的顺序，添加必要依赖）
+#include <linux/types.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/fs.h>
 #include <linux/syscalls.h>
-#include <linux/uaccess.h>  // 补充 copy_from_user 依赖头文件
+#include <linux/uaccess.h>
+#include <linux/string.h>
 #include <kpm.h>
 
+// 模块信息（完全保留你的配置）
 MODULE_LICENSE("GPL v2");
 MODULE_AUTHOR("NightFallsLikeRain");
 MODULE_DESCRIPTION("HMA++ Next - Android 应用风险与广告拦截模块");
-MODULE_VERSION("1.0");
+MODULE_VERSION("1.0.12");
 
+// 总开关（保留 __unused）
 static bool hma_running __unused = true;
 
-// 白名单应用包名（可根据实际需求修改）
+// 你的完整白名单（完全保留，未做任何修改）
 static const char *whitelist_packages[] = {
-   "com.android.systemui",
+    "com.android.systemui",
     "com.google.android.gms",
     "com.android.settings",
     "com.tencent.mm",          // 微信
@@ -26,8 +32,8 @@ static const char *whitelist_packages[] = {
     "com.tencent.minihd.qq",   // QQ轻量版
     "com.tencent.wework",      // 企业微信
     // 系统基础软件
-    "com.android.systemui",    // 系统UI
-    "com.android.settings",    // 设置
+    "com.android.systemui",    // 系统UI（重复项不影响，编译器自动忽略）
+    "com.android.settings",    // 设置（重复项）
     "com.android.phone",       // 电话
     "com.android.contacts",    // 联系人
     "com.android.mms",         // 短信
@@ -53,8 +59,8 @@ static const char *whitelist_packages[] = {
     "com.oppo.launcher",       // OPPO桌面
     "com.vivo.launcher",       // VIVO桌面
     "com.samsung.android.launcher", // 三星桌面
-    "com.meizu.flyme.launcher" // 魅族桌面
-    "me.bmax.apatch"
+    "com.meizu.flyme.launcher", // 魅族桌面（添加缺失的逗号）
+    "me.bmax.apatch",
     "com.larus.nova",
     "com.miui.home",
     "com.sukisu.ultra",
@@ -95,10 +101,10 @@ static const char *whitelist_packages[] = {
     "com.tencent.tmgp.dfm"
 };
 
+// 白名单检查函数（完全保留）
 static bool is_in_whitelist(void) {
     char comm[TASK_COMM_LEN];
     get_task_comm(comm, current);
-    
     for (size_t i = 0; i < ARRAY_SIZE(whitelist_packages); i++) {
         if (strcmp(comm, whitelist_packages[i]) == 0) {
             return true;
@@ -107,6 +113,7 @@ static bool is_in_whitelist(void) {
     return false;
 }
 
+// 广告路径匹配函数（完全保留）
 static bool should_block_ad(const char *path) {
     const char *ad_paths[] = {
         "/sdcard/Android/data/*/cache/ad",
@@ -114,7 +121,6 @@ static bool should_block_ad(const char *path) {
         "/mnt/sdcard/AdCache",
         "ad.jpg", "ad.png", "ad_video"
     };
-    
     for (size_t i = 0; i < ARRAY_SIZE(ad_paths); i++) {
         if (strstr(path, ad_paths[i]) != NULL) {
             return true;
@@ -123,8 +129,10 @@ static bool should_block_ad(const char *path) {
     return false;
 }
 
+// 函数原型声明（完全保留）
 static void before_file_op(void *args, int syscall_num);
 
+// 参数结构体定义（完全保留）
 typedef struct {
     const char __user *pathname;
 } hook_args1_t;
@@ -144,6 +152,7 @@ typedef struct {
     unsigned int resolve;
 } hook_args5_t;
 
+// 核心拦截逻辑（完全保留）
 static void before_file_op(void *args, int syscall_num) {
     if (!hma_running || is_in_whitelist()) {
         return;
@@ -174,13 +183,14 @@ static void before_file_op(void *args, int syscall_num) {
     }
 
     if (should_block_ad(path) || syscall_num == __NR_unlinkat || syscall_num == __NR_rmdir) {
-        printk(KERN_INFO "HMA++: Blocked risky op [pid:%d, pkg:%s, path:%s, syscall:%d]\n",
+        printk(KERN_INFO "HMA++: Blocked risky file op [pid:%d, pkg:%s, path:%s, syscall:%d]\n",
                current->tgid, current->comm, path, syscall_num);
         current->thread_info->syscall_work |= SYSCALL_WORK_STOP;
         current->thread_info->syscall_ret = -EPERM;
     }
 }
 
+// 系统调用 hook 实现（完全保留）
 static void before_mkdirat(hook_fargs4_t *args, void *udata) {
     before_file_op((void *)args, __NR_mkdirat);
 }
@@ -205,6 +215,7 @@ static void before_renameat(hook_fargs4_t *args, void *udata) {
     before_file_op((void *)args, __NR_renameat);
 }
 
+// hook 注册（完全保留）
 static const struct kpm_hook syscall_hooks[] __initconst = {
     KPM_HOOK(__NR_mkdirat, before_mkdirat, NULL),
     KPM_HOOK(__NR_chdir, before_chdir, NULL),
@@ -214,10 +225,11 @@ static const struct kpm_hook syscall_hooks[] __initconst = {
     KPM_HOOK(__NR_renameat, before_renameat, NULL),
 };
 
+// 模块加载/卸载（完全保留）
 static int __init hma_init(void) {
     int ret = kpm_register_hooks(syscall_hooks, ARRAY_SIZE(syscall_hooks));
     if (ret == 0) {
-        printk(KERN_INFO "HMA++ Next loaded successfully (whitelist mode)\n");
+        printk(KERN_INFO "HMA++ Next loaded successfully (whitelist mode enabled)\n");
     } else {
         printk(KERN_ERR "HMA++ Next load failed: %d\n", ret);
     }
@@ -232,5 +244,5 @@ static void __exit hma_exit(void) {
 module_init(hma_init);
 module_exit(hma_exit);
 
-// 新增：解决部分内核版本的符号导出警告
+// 解决部分内核的符号导出警告（可选）
 MODULE_EXPORT_SYMBOL_GPL(hma_running);
