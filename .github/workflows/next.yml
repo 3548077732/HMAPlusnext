@@ -27,18 +27,23 @@ jobs:
           sudo apt clean
           chmod -R 777 $(pwd)
 
-      - name: 下载 Google 官方 Android 5.15 通用内核（100% 存在分支）
+      - name: 下载 Google 官方 5.15 内核源码（正确 URL + 必存在分支）
         run: |
           mkdir -p ./kernel-src ./kernel-headers
           ARCH=${{ github.event.inputs.kernel_arch }}
-          # 关键：使用 Google 官方通用内核，分支 linux-5.15.y 是长期支持分支，必存在
-          git clone --depth 1 -b linux-5.15.y https://github.com/android/kernel/common.git ./kernel-src
+          # 正确 URL：Google 内核源码托管在 googlesource.com，分支 linux-5.15.y 必存在
+          git clone --depth 1 -b linux-5.15.y https://android.googlesource.com/kernel/common.git ./kernel-src
           
-          # 复制头文件（适配通用内核目录结构）
+          # 验证克隆结果
+          if [ ! -d "./kernel-src/include" ]; then
+            echo "错误：内核源码克隆失败，目录不存在！"
+            exit 1
+          fi
+          
+          # 复制头文件（适配通用内核结构）
           cp -r ./kernel-src/include ./kernel-headers/
           if [ "$ARCH" = "arm64" ]; then
             cp -r ./kernel-src/arch/arm64/include ./kernel-headers/arch-include
-            # 补充 arm64 架构必需的 asm 头文件
             cp -r ./kernel-src/arch/arm64/include/generated ./kernel-headers/arch-include/
           else
             cp -r ./kernel-src/arch/arm/include ./kernel-headers/arch-include
@@ -47,13 +52,13 @@ jobs:
           
           # 全局权限赋值
           chmod -R 777 ./kernel-src ./kernel-headers
-          echo "Google 官方 5.15 内核源码克隆成功！"
+          echo "✅ Google 官方 5.15 内核源码克隆成功！"
 
-      - name: 配置内核编译环境（通用架构适配）
+      - name: 配置内核编译环境（适配 Apatch KPM）
         run: |
           ARCH=${{ github.event.inputs.kernel_arch }}
           cd ./kernel-src
-          # 生成对应架构的默认配置（通用内核支持 arm/arm64）
+          # 生成对应架构默认配置
           if [ "$ARCH" = "arm64" ]; then
             make ARCH=arm64 CROSS_COMPILE=aarch64-linux-android- defconfig
             CROSS_COMPILE="aarch64-linux-android-"
@@ -65,11 +70,10 @@ jobs:
           sed -i 's/# CONFIG_MODULES is not set/CONFIG_MODULES=y/' .config
           sed -i 's/# CONFIG_MODULE_UNLOAD is not set/CONFIG_MODULE_UNLOAD=y/' .config
           sed -i 's/# CONFIG_MODULE_FORCE_LOAD is not set/CONFIG_MODULE_FORCE_LOAD=y/' .config
-          # 适配 Apatch KPM 编译需求
           sed -i 's/# CONFIG_RETPOLINE is not set/CONFIG_RETPOLINE=y/' .config
           cd ..
 
-      - name: 补充 KPM 必需头文件
+      - name: 补充 KPM 核心头文件
         run: |
           mkdir -p ./kernel-headers/linux
           chmod 777 ./kernel-headers/linux
@@ -100,7 +104,7 @@ jobs:
           EOF
           chmod 777 ./kernel-headers/linux/kpm.h
 
-      - name: Build HMA++ KPM Module（最终编译）
+      - name: 编译 HMA++ KPM 模块（最终构建）
         run: |
           export KERNELDIR=$(pwd)/kernel-src
           export ARCH=${{ github.event.inputs.kernel_arch }}
@@ -109,15 +113,16 @@ jobs:
           else
             export CROSS_COMPILE=arm-linux-androideabi-
           fi
-          # 头文件路径包含通用内核和 KPM 补充头文件
+          # 头文件路径+编译兼容选项
           export EXTRA_CFLAGS="-I$(pwd)/kernel-headers -I$(pwd)/kernel-headers/linux -I$(pwd)/kernel-headers/arch-include -Wall -Wextra -O2 -fPIC -w"
           chmod 777 ./Makefile
           make clean || true
-          # 限制并发数为 4，避免 GitHub Actions 资源耗尽
-          make -j4 V=1 || { echo "编译失败！"; exit 1; }
+          # 限制并发数，避免资源耗尽
+          make -j4 V=1 || { echo "❌ 编译失败！"; exit 1; }
           chmod 777 ./HMA++.ko
+          echo "✅ HMA++ KPM 模块编译成功！"
 
-      - name: Upload Build Output
+      - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
           name: HMA++-Next-KPM-${{ github.event.inputs.kernel_arch }}
