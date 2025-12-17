@@ -49,7 +49,7 @@ jobs:
           chmod -R 777 $NDK_ROOT
           echo "✅ NDK 准备成功！sysroot：$SYSROOT"
 
-      - name: 克隆 Android 5.15 内核头文件（含 KPM 头文件）
+      - name: 克隆 Android 5.15 内核头文件
         run: |
           echo "📥 克隆内核头文件..."
           git clone --depth 1 -b android13-5.15 https://android.googlesource.com/kernel/common.git kernel-src
@@ -62,12 +62,10 @@ jobs:
           cp -r kernel-src/arch/arm64/include ./kernel-headers/arch-arm64
           cp -r kernel-src/arch/arm64/include/asm ./kernel-headers/arch-arm64/asm
           
-          # 复制 KPM 头文件（适配 5.15+ 内核 KPM 框架）
-          mkdir -p ./kernel-headers/kpm
-          wget -q -O ./kernel-headers/kpm/kpm.h "https://raw.githubusercontent.com/bmax121/KernelPatch/main/kpm/kpm.h"
+          
           
           # 验证关键头文件
-          [ ! -f "./kernel-headers/kpm/kpm.h" ] && { echo "❌ KPM 头文件缺失！"; exit 1; }
+          
           [ ! -f "./kernel-headers/arch-arm64/asm/cache.h" ] && { echo "❌ asm/cache.h 缺失！"; exit 1; }
           
           chmod -R 777 ./kernel-headers
