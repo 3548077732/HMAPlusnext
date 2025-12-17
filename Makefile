@@ -3,6 +3,7 @@ MODULE_NAME := HMA++
 OBJ_NAME := $(MODULE_NAME).o
 KO_NAME := $(MODULE_NAME).ko
 KPM_NAME := $(MODULE_NAME).kpm
+KP_DIR = ./KernelPatch
 
 # 工具链配置（从 GitHub Actions 环境变量读取，路径修正）
 NDK_ROOT ?= ./android-ndk-r25c
