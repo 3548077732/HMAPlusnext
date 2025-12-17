@@ -27,95 +27,73 @@ jobs:
           sudo apt clean
           chmod -R 777 $(pwd)
 
-      - name: 下载 Android NDK r25c（动态匹配带版本后缀的编译器）
+      - name: 下载 Android NDK r25c（动态匹配编译器）
         run: |
           mkdir -p ./ndk
-          # 下载 NDK r25c
           wget -q https://dl.google.com/android/repository/android-ndk-r25c-linux.zip -O ndk.zip
           unzip -q -o ndk.zip -d ./ndk
           
-          # 动态查找 LLVM 工具链目录
+          # 动态查找 LLVM 工具链和编译器
           NDK_ROOT=$(pwd)/ndk/android-ndk-r25c
           LLVM_PREBUILT=$(find $NDK_ROOT/toolchains/llvm/prebuilt -name "linux-x86_64" -type d | head -n 1)
           LLVM_BIN=$LLVM_PREBUILT/bin
           
-          # 核心修复：动态匹配带 API 版本后缀的编译器，优先选最高版本（如 33）
+          # 匹配对应架构的编译器（取最高 API 版本）
           if [ "${{ github.event.inputs.kernel_arch }}" = "arm64" ]; then
-            # 匹配 arm64 编译器：aarch64-linux-android*-clang，排序后取最高版本
             ARM64_CC=$(ls $LLVM_BIN/aarch64-linux-android*-clang 2>/dev/null | sort -V | tail -n 1)
+            [ -z "$ARM64_CC" ] && { echo "❌ arm64 编译器缺失！"; exit 1; }
+            export CC=$ARM64_CC
+            export CROSS_PREFIX=$(echo $ARM64_CC | sed 's/-clang$//')-
           else
-            # 匹配 arm32 编译器：armv7a-linux-androideabi*-clang（日志中实际前缀是 armv7a-）
             ARM32_CC=$(ls $LLVM_BIN/armv7a-linux-androideabi*-clang 2>/dev/null | sort -V | tail -n 1)
+            [ -z "$ARM32_CC" ] && { echo "❌ arm32 编译器缺失！"; exit 1; }
+            export CC=$ARM32_CC
+            export CROSS_PREFIX=$(echo $ARM32_CC | sed 's/-clang$//')-
           fi
           
-          # 验证编译器存在
-          if [ "${{ github.event.inputs.kernel_arch }}" = "arm64" ] && [ -z "$ARM64_CC" ]; then
-            echo "❌ arm64 LLVM 编译器缺失！"
-            ls -la $LLVM_BIN/aarch64-linux-android*-clang 2>/dev/null
-            exit 1
-          elif [ "${{ github.event.inputs.kernel_arch }}" = "arm" ] && [ -z "$ARM32_CC" ]; then
-            echo "❌ arm32 LLVM 编译器缺失！"
-            ls -la $LLVM_BIN/armv7a-linux-androideabi*-clang 2>/dev/null
-            exit 1
-          fi
-          
-          # 保存编译器路径和 LLVM 目录到环境变量
-          if [ "${{ github.event.inputs.kernel_arch }}" = "arm64" ]; then
-            echo "CC=$ARM64_CC" >> $GITHUB_ENV
-            echo "CROSS_COMPILE_PREFIX=$(echo $ARM64_CC | sed 's/-clang$//')-" >> $GITHUB_ENV
-          else
-            echo "CC=$ARM32_CC" >> $GITHUB_ENV
-            echo "CROSS_COMPILE_PREFIX=$(echo $ARM32_CC | sed 's/-clang$//')-" >> $GITHUB_ENV
-          fi
+          # 保存环境变量
+          echo "CC=$CC" >> $GITHUB_ENV
+          echo "CROSS_PREFIX=$CROSS_PREFIX" >> $GITHUB_ENV
           echo "LLVM_BIN=$LLVM_BIN" >> $GITHUB_ENV
           echo "NDK_ROOT=$NDK_ROOT" >> $GITHUB_ENV
           
           chmod -R 777 ./ndk
-          echo "✅ NDK r25c LLVM 工具链准备成功！"
-          echo "编译器路径：${{ env.CC }}"
-          echo "交叉编译前缀：${{ env.CROSS_COMPILE_PREFIX }}"
+          echo "✅ 编译器准备成功：$CC"
 
       - name: 克隆谷歌官方内核（android13-5.15 分支）
         run: |
           mkdir -p ./kernel-src ./kernel-headers
           git clone --depth 1 -b android13-5.15 https://android.googlesource.com/kernel/common.git ./kernel-src
           
-          # 验证克隆完整性
-          if [ ! -d "./kernel-src/include" ] || [ ! -f "./kernel-src/Makefile" ] || [ ! -d "./kernel-src/arch" ]; then
-            echo "❌ 谷歌内核克隆失败！"
-            ls -la ./kernel-src
-            exit 1
-          fi
+          # 验证内核源码完整性
+          [ ! -f "./kernel-src/Makefile" ] && { echo "❌ 内核源码克隆失败！"; exit 1; }
           
           # 复制基础头文件
           ARCH=${{ github.event.inputs.kernel_arch }}
           cp -r ./kernel-src/include ./kernel-headers/
-          if [ "$ARCH" = "arm64" ] && [ -d "./kernel-src/arch/arm64/include" ]; then
-            cp -r ./kernel-src/arch/arm64/include ./kernel-headers/arch-include
-          elif [ "$ARCH" = "arm" ] && [ -d "./kernel-src/arch/arm/include" ]; then
-            cp -r ./kernel-src/arch/arm/include ./kernel-headers/arch-include
-          fi
+          [ "$ARCH" = "arm64" ] && [ -d "./kernel-src/arch/arm64/include" ] && cp -r ./kernel-src/arch/arm64/include ./kernel-headers/arch-include
+          [ "$ARCH" = "arm" ] && [ -d "./kernel-src/arch/arm/include" ] && cp -r ./kernel-src/arch/arm/include ./kernel-headers/arch-include
           
           chmod -R 777 ./kernel-src ./kernel-headers
-          echo "✅ 谷歌内核克隆成功！"
+          echo "✅ 内核源码准备成功！"
 
-      - name: 配置内核（LLVM/Clang 编译适配）
+      - name: 配置内核（完整流程：defconfig → prepare → modules_prepare）
         run: |
           ARCH=${{ github.event.inputs.kernel_arch }}
-          LLVM_BIN=${{ env.LLVM_BIN }}
           CC=${{ env.CC }}
-          CROSS_COMPILE=${{ env.CROSS_COMPILE_PREFIX }}
+          CROSS_PREFIX=${{ env.CROSS_PREFIX }}
+          LLVM_BIN=${{ env.LLVM_BIN }}
           cd ./kernel-src
           
-          # 明确指定 LLVM 编译器和链接器
+          # 配置编译器和链接器
           export CC=$CC
           export LD=$LLVM_BIN/ld.lld
-          export CROSS_COMPILE=$CROSS_COMPILE
+          export CROSS_COMPILE=$CROSS_PREFIX
           
-          # 生成内核配置
+          # 1. 生成默认配置
           make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE CC=$CC LD=$LD defconfig
           
-          # 开启模块支持+LLVM 编译兼容配置
+          # 2. 开启必需配置
           sed -i 's/# CONFIG_MODULES is not set/CONFIG_MODULES=y/' .config
           sed -i 's/# CONFIG_MODULE_UNLOAD is not set/CONFIG_MODULE_UNLOAD=y/' .config
           sed -i 's/# CONFIG_MODULE_FORCE_LOAD is not set/CONFIG_MODULE_FORCE_LOAD=y/' .config
@@ -124,8 +102,16 @@ jobs:
           sed -i 's/# CONFIG_MODULE_SIG is not set/CONFIG_MODULE_SIG=n/' .config
           sed -i 's/# CONFIG_LLVM=y/CONFIG_LLVM=y/' .config
           sed -i 's/# CONFIG_LLVM_IAS=y/CONFIG_LLVM_IAS=y/' .config
+          # 禁用栈保护（避免 mstack-protector-guard-offset 错误）
+          sed -i 's/CONFIG_STACKPROTECTOR=y/# CONFIG_STACKPROTECTOR is not set/' .config
+          
+          # 3. 生成核心头文件（关键步骤，之前遗漏）
+          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE CC=$CC LD=$LD prepare -j2
+          # 4. 准备模块编译环境（生成模块必需的依赖文件）
+          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE CC=$CC LD=$LD modules_prepare -j2
           
           cd ..
+          echo "✅ 内核配置完整！"
 
       - name: 补充 KPM 核心头文件
         run: |
@@ -158,35 +144,24 @@ jobs:
           EOF
           chmod 777 ./kernel-headers/linux/kpm.h
 
-      - name: 编译 HMA++ KPM 模块（LLVM 最终构建）
+      - name: 编译 HMA++ KPM 模块（最终构建）
         run: |
           export KERNELDIR=$(pwd)/kernel-src
           export ARCH=${{ github.event.inputs.kernel_arch }}
-          LLVM_BIN=${{ env.LLVM_BIN }}
-          CC=${{ env.CC }}
-          CROSS_COMPILE=${{ env.CROSS_COMPILE_PREFIX }}
+          export CC=${{ env.CC }}
+          export LD=${{ env.LLVM_BIN }}/ld.lld
+          export CROSS_COMPILE=${{ env.CROSS_PREFIX }}
           
-          # 配置编译环境
-          export CC=$CC
-          export LD=$LLVM_BIN/ld.lld
-          export CROSS_COMPILE=$CROSS_COMPILE
-          
-          # 头文件路径
+          # 头文件路径+编译器兼容选项
           if [ "$ARCH" = "arm64" ]; then
-            export EXTRA_CFLAGS="-I$(pwd)/kernel-headers -I$(pwd)/kernel-headers/linux -I$(pwd)/kernel-headers/arch-include -I$KERNELDIR/arch/arm64/include/generated -Wall -Wextra -O2 -fPIC -w -DKERNEL_5_15 -fno-pie"
+            export EXTRA_CFLAGS="-I$(pwd)/kernel-headers -I$(pwd)/kernel-headers/linux -I$(pwd)/kernel-headers/arch-include -I$KERNELDIR/arch/arm64/include/generated -Wall -Wextra -O2 -fPIC -w -DKERNEL_5_15 -fno-pie -nostdinc"
           else
-            export EXTRA_CFLAGS="-I$(pwd)/kernel-headers -I$(pwd)/kernel-headers/linux -I$(pwd)/kernel-headers/arch-include -I$KERNELDIR/arch/arm/include/generated -Wall -Wextra -O2 -fPIC -w -DKERNEL_5_15 -fno-pie"
-          fi
-          
-          # 验证编译器
-          if [ ! -f "$CC" ] || [ ! -f "$LD" ]; then
-            echo "❌ 编译器路径错误！"
-            exit 1
+            export EXTRA_CFLAGS="-I$(pwd)/kernel-headers -I$(pwd)/kernel-headers/linux -I$(pwd)/kernel-headers/arch-include -I$KERNELDIR/arch/arm/include/generated -Wall -Wextra -O2 -fPIC -w -DKERNEL_5_15 -fno-pie -nostdinc"
           fi
           
           chmod 777 ./Makefile
           make clean || true
-          # 编译模块
+          # 编译模块（显式指定所有工具链参数）
           make -j2 V=1 CC=$CC LD=$LD CROSS_COMPILE=$CROSS_COMPILE || { echo "❌ 编译失败！"; exit 1; }
           
           # 验证模块生成
