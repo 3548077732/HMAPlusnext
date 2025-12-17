@@ -37,7 +37,7 @@ static void before_openat(hook_fargs5_t *args, void *udata) {
         return;
     }
 
-    // 替换 strncpy_from_user → kf_strncpy_from_user（框架兼容函数）
+    // 读取用户空间路径（框架兼容函数）
     long len = kf_strncpy_from_user(path, (void *)syscall_argn(args, 1), PATH_MAX - 1);
     if (len <= 0) {
         pr_warn("[HMA++] openat: 路径读取失败\n");
@@ -71,7 +71,7 @@ static long mkdir_hook_init(const char *args, const char *event, void *__user re
     return 0;
 }
 
-// 风险拦截控制（简化参数处理）
+// 风险拦截控制（简化参数处理，使用内核标准 copy_to_user）
 static long hma_control0(const char *args, char *__user out_msg, int outlen) {
     char msg[64] = {0};
     if (!args || strlen(args) != 1) {
@@ -83,22 +83,26 @@ static long hma_control0(const char *args, char *__user out_msg, int outlen) {
     snprintf(msg, sizeof(msg)-1, "HMA状态：%s", hma_enabled ? "开启" : "关闭");
 
 out:
+    // 替换 kf_strncpy_to_user → copy_to_user（内核标准函数，无兼容性问题）
     if (out_msg && outlen >= strlen(msg) + 1) {
-        // 替换 strncpy_to_user → kf_strncpy_to_user（框架兼容函数）
-        kf_strncpy_to_user(out_msg, msg, strlen(msg) + 1);
+        if (copy_to_user(out_msg, msg, strlen(msg) + 1)) {
+            pr_warn("[HMA++] 向用户空间写入失败\n");
+        }
     }
     return 0;
 }
 
-// 广告拦截控制（适配 KPM_CTL1 接口，仅占位）
+// 广告拦截控制（适配 KPM_CTL1 接口，使用 copy_to_user）
 static long hma_control1(void *a1, void *a2, void *a3) {
     char *__user out_msg = (char *__user)a2;
     int outlen = (int)(unsigned long)a3;
     char msg[] = "广告控制暂未启用（最小版本）";
 
+    // 使用内核标准 copy_to_user 写入用户空间
     if (out_msg && outlen >= sizeof(msg)) {
-        // 替换 strncpy_to_user → kf_strncpy_to_user（框架兼容函数）
-        kf_strncpy_to_user(out_msg, msg, sizeof(msg));
+        if (copy_to_user(out_msg, msg, sizeof(msg))) {
+            pr_warn("[HMA++] 广告控制：向用户空间写入失败\n");
+        }
     }
     return 0;
 }
