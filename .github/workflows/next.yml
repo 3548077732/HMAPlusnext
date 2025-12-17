@@ -1,4 +1,4 @@
-name: Build
+name: Build2
 
 on:
   push:
@@ -11,26 +11,26 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout HMA++ 源码
+      - name: Checkout HMA++ 源码（自动适配项目目录）
         uses: actions/checkout@v5
 
-      - name: Checkout KernelPatch
+      - name: Checkout KernelPatch（使用相对路径，避免硬编码）
         uses: actions/checkout@v5
         with:
           repository: bmax121/KernelPatch
-          path: /home/runner/work/HMAPlusPlus/HMAPlusPlus/KernelPatch
+          path: ./KernelPatch  # 相对路径，直接放在项目根目录下
 
       - name: 验证 KernelPatch 目录结构
         run: |
-          ls -R /home/runner/work/HMAPlusPlus/HMAPlusPlus/KernelPatch
-          # 确保核心 kpm.mk 存在，不存在则直接下载备用
-          KPM_MK_PATH="/home/runner/work/HMAPlusPlus/HMAPlusPlus/KernelPatch/kpm/kpm.mk"
+          ls -R ./KernelPatch  # 相对路径查看
+          # 确保核心 kpm.mk 存在，不存在则下载备用
+          KPM_MK_PATH="./KernelPatch/kpm/kpm.mk"
           if [ ! -f "$KPM_MK_PATH" ]; then
             echo "⚠️  未找到 kpm.mk，下载备用版本"
-            mkdir -p /home/runner/work/HMAPlusPlus/HMAPlusPlus/KernelPatch/kpm
+            mkdir -p ./KernelPatch/kpm
             wget -q -O $KPM_MK_PATH "https://raw.githubusercontent.com/bmax121/KernelPatch/main/kpm/kpm.mk"
           fi
-          chmod -R 777 /home/runner/work/HMAPlusPlus/HMAPlusPlus/KernelPatch
+          chmod -R 777 ./KernelPatch
 
       - name: 安装完整依赖
         run: |
@@ -40,10 +40,9 @@ jobs:
 
       - name: 下载并解压 Android NDK r25c（兼容 KernelPatch）
         run: |
-          # 下载 NDK（稳定兼容，避免速度限制）
           wget -q https://dl.google.com/android/repository/android-ndk-r25c-linux.zip -O ndk.zip
           unzip -q -o ndk.zip
-          # 验证 NDK 工具链
+          # 相对路径验证 NDK
           NDK_ROOT=$(pwd)/android-ndk-r25c
           if [ ! -d "$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64" ]; then
             echo "❌ NDK 解压失败！"
@@ -54,9 +53,9 @@ jobs:
 
       - name: 配置 KernelPatch 构建环境
         run: |
-          # 复制核心构建文件到项目根目录
-          cp -r /home/runner/work/HMAPlusPlus/HMAPlusPlus/KernelPatch/kpm ./kpm
-          # 编写配置文件（适配 arm64 架构，可根据需求修改）
+          # 复制核心构建文件到项目根目录（相对路径）
+          cp -r ./KernelPatch/kpm ./kpm
+          # 编写配置文件（适配 arm64 架构）
           ARCH="arm64"
           TARGET="aarch64-linux-android"
           cat > ./kpm_config.mk << EOF
@@ -84,17 +83,17 @@ jobs:
           MODULE_LICENSE := GPL-2.0
           MODULE_VERSION := 1.0.0
 
-          # 源码文件（确保 HMA++.c 在项目根目录）
+          # 源码文件
           SRC_FILES := HMA++.c
 
-          # 构建目标（按用户模板输出 HMA++.kpm）
+          # 构建目标（输出 HMA++.kpm）
           all: \$(MODULE_NAME).ko
               mv \$(MODULE_NAME).ko \$(MODULE_NAME).kpm
 
           clean:
               rm -f \$(MODULE_NAME).ko \$(MODULE_NAME).kpm *.mod.c *.o .*.cmd Module.symvers modules.order
           EOF
-          # 验证源码文件存在
+          # 验证源码文件
           if [ ! -f "./HMA++.c" ]; then
             echo "❌ 未找到 HMA++.c 源码文件！"
             exit 1
@@ -104,7 +103,7 @@ jobs:
       - name: 编译 HMA++ 模块
         run: make -j2 V=1 || { echo "❌ 编译失败！"; exit 1; }
 
-      - name: 上传产物（按用户模板命名 HMA++.kpm）
+      - name: 上传产物（保持用户模板命名）
         uses: actions/upload-artifact@v4
         with:
           name: HMA++.kpm
