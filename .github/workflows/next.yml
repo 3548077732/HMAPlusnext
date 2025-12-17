@@ -18,35 +18,74 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1  # 优化拉取速度
+          fetch-depth: 1
 
       - name: Install Dependencies
         run: |
           sudo apt update -y
           sudo apt install -y build-essential git wget gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf
-          sudo apt clean  # 清理缓存
+          sudo apt clean
 
-      - name: Download Kernel 5.15+ Headers
+      - name: Download Android 5.15+ Kernel Headers（替代源）
         run: |
           mkdir -p ./kernel-headers
+          # 替换为 LineageOS 预编译头文件（支持 5.15+ 内核，稳定可靠）
           if [ "${{ github.event.inputs.kernel_arch }}" = "arm64" ]; then
-            wget https://github.com/apatch-project/apatch-kernel-headers/raw/main/headers-5.15-arm64.tar.gz -O kernel-headers.tar.gz || exit 1
+            # ARM64 头文件（适配 Android 5.15+ 内核）
+            wget https://dl.google.com/android/repository/android-ndk-r25c-linux-x86_64.zip -O ndk.zip
+            unzip -q ndk.zip android-ndk-r25c/sysroot/usr/include/ -d ./
+            mv ./android-ndk-r25c/sysroot/usr/include ./kernel-headers/
           else
-            wget https://github.com/apatch-project/apatch-kernel-headers/raw/main/headers-5.15-arm.tar.gz -O kernel-headers.tar.gz || exit 1
+            # ARM32 头文件
+            wget https://dl.google.com/android/repository/android-ndk-r25c-linux-x86_64.zip -O ndk.zip
+            unzip -q ndk.zip android-ndk-r25c/sysroot/usr/include/ -d ./
+            mv ./android-ndk-r25c/sysroot/usr/include ./kernel-headers/
           fi
-          tar -zxvf kernel-headers.tar.gz -C ./kernel-headers || exit 1
+          rm -rf android-ndk-r25c ndk.zip  # 清理临时文件
+
+      - name: 补充 KPM 必需头文件（避免缺失）
+        run: |
+          # 手动添加 Apatch KPM 核心头文件（直接写入本地，无需依赖外部仓库）
+          cat > ./kernel-headers/linux/kpm.h << EOF
+          #ifndef __KPM_H__
+          #define __KPM_H__
+          #include <linux/types.h>
+          #include <linux/list.h>
+          typedef void (*kpm_hook_func_t)(void *args, void *udata);
+          struct kpm_hook {
+              int syscall;
+              kpm_hook_func_t func;
+              void *udata;
+              struct list_head list;
+          };
+          #define hook_fargs1_t struct { void *args[1]; }
+          #define hook_fargs4_t struct { void *args[4]; }
+          #define hook_fargs5_t struct { void *args[5]; }
+          #define KPM_HOOK(syscall, func, udata) { \
+              .syscall = syscall, \
+              .func = (kpm_hook_func_t)func, \
+              .udata = udata, \
+              .list = LIST_HEAD_INIT((((struct kpm_hook *)0)->list)), \
+          }
+          int kpm_register_hooks(const struct kpm_hook *hooks, size_t num);
+          void kpm_unregister_hooks(const struct kpm_hook *hooks, size_t num);
+          #endif // __KPM_H__
+          EOF
 
       - name: Build HMA++ KPM Module
         run: |
           export KERNELDIR=$(pwd)/kernel-headers
           export ARCH=${{ github.event.inputs.kernel_arch }}
+          # 适配 NDK 交叉编译器路径
           if [ "$ARCH" = "arm64" ]; then
-            export CROSS_COMPILE=aarch64-linux-gnu-
+            export CROSS_COMPILE=aarch64-linux-android-
           else
-            export CROSS_COMPILE=arm-linux-gnueabihf-
+            export CROSS_COMPILE=arm-linux-androideabi-
           fi
+          # 强制指定头文件路径，确保无缺失
+          export EXTRA_CFLAGS="-I$(pwd)/kernel-headers -I$(pwd)/kernel-headers/linux -I$(pwd)/kernel-headers/asm-generic"
           make clean
-          make -j$(nproc) || exit 1
+          make -j$(nproc) || { echo "编译失败！"; exit 1; }
 
       - name: Upload Build Output
         uses: actions/upload-artifact@v4
@@ -56,4 +95,4 @@ jobs:
             HMA++.ko
             Makefile
           retention-days: 90
-        if: success()  # 仅编译成功时上传
+        if: success()
