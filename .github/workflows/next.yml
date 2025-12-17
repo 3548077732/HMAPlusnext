@@ -20,11 +20,11 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: 安装完整工具链（GCC+LLVM+依赖补全）
+      - name: 安装终极工具链（补全所有隐性依赖）
         run: |
           sudo apt update -y
-          # 补全可能缺失的依赖，确保 scripts/mod 编译成功
-          sudo apt install -y build-essential git flex bison bc libssl-dev libelf-dev dwarves clang llvm lld binutils gcc libc6-dev
+          # 安装所有可能缺失的依赖，包括交叉编译相关
+          sudo apt install -y build-essential git flex bison bc libssl-dev libelf-dev dwarves clang llvm lld binutils gcc libc6-dev crossbuild-essential-arm64 crossbuild-essential-armhf
           sudo apt clean
           chmod -R 777 $(pwd)
 
@@ -34,16 +34,16 @@ jobs:
           git clone --depth 1 -b android13-5.15 https://android.googlesource.com/kernel/common.git ./kernel-src
           [ ! -f "./kernel-src/Makefile" ] && { echo "❌ 内核源码克隆失败！"; exit 1; }
           
-          # 全目录递归权限+头文件复制
+          # 全目录权限+头文件复制
           ARCH=${{ github.event.inputs.kernel_arch }}
           cp -r ./kernel-src/include ./kernel-headers/
           [ "$ARCH" = "arm64" ] && [ -d "./kernel-src/arch/arm64/include" ] && cp -r ./kernel-src/arch/arm64/include ./kernel-headers/arch-include
           [ "$ARCH" = "arm" ] && [ -d "./kernel-src/arch/arm/include" ] && cp -r ./kernel-src/arch/arm/include ./kernel-headers/arch-include
-          chmod -R 777 ./kernel-src  # 确保所有文件可读写执行
+          chmod -R 777 ./kernel-src
           
           echo "✅ 内核源码准备成功！"
 
-      - name: 修改内核 Makefile（剥离 VDSO+scripts/mod 兼容）
+      - name: 极简 Makefile 修改（仅保留核心兼容）
         run: |
           ARCH=${{ github.event.inputs.kernel_arch }}
           cd ./kernel-src
@@ -58,23 +58,18 @@ jobs:
             rm -rf arch/arm/kernel/vdso/Makefile
             echo -e "all:\nclean:" > arch/arm/kernel/vdso/Makefile
           fi
-          sed -i '/VDSO/d' Makefile
-          sed -i '/vdso/d' Makefile
           
-          # 2. 禁用不兼容参数
-          sed -i 's/-mbranch-protection=pac-ret+leaf+bti//g' arch/$ARCH/Makefile
-          sed -i 's/-Wa,-march//g' arch/$ARCH/Makefile
-          
-          # 3. 修复 scripts/mod/Makefile：添加 clang 兼容参数
-          sed -i '/CCFLAGS/ s/$/ -mgeneral-regs-only -fno-asynchronous-unwind-tables -fno-unwind-tables/' scripts/mod/Makefile
+          # 2. 禁用所有不兼容参数（彻底清空架构编译参数）
+          sed -i '/-mbranch-protection/d' arch/$ARCH/Makefile
+          sed -i '/-Wa,-march/d' arch/$ARCH/Makefile
+          sed -i '/CCFLAGS/s/=.*/= -w -O2/' arch/$ARCH/Makefile  # 清空并设置基础参数
           
           chmod -R 777 ./arch ./Makefile ./scripts
-          echo "✅ Makefile 修复完成！"
+          echo "✅ Makefile 极简修改完成！"
           cd ..
 
-      - name: 补充 kpm.h 并双重复制+验证
+      - name: 补充 kpm.h 并验证
         run: |
-          # 生成 kpm.h
           cat > ./kpm.h << EOF
           #ifndef __KPM_H__
           #define __KPM_H__
@@ -101,7 +96,6 @@ jobs:
           #endif // __KPM_H__
           EOF
           
-          # 双重复制+验证
           cp -f ./kpm.h ./kernel-src/include/
           cp -f ./kpm.h ./kernel-src/include/linux/
           [ ! -f "./kernel-src/include/kpm.h" ] && { echo "❌ kpm.h 复制失败！"; exit 1; }
@@ -109,125 +103,128 @@ jobs:
           
           echo "✅ kpm.h 准备完成！"
 
-      - name: 配置内核（极简+强制禁用模块干扰功能）
+      - name: 超极简内核配置（仅保留模块核心）
         run: |
           ARCH=${{ github.event.inputs.kernel_arch }}
           cd ./kernel-src
           
-          # 工具链配置（目标 LLVM + 主机 GCC）
+          # 工具链配置（显式指定目标架构）
           export CC=clang
           export LD=ld.lld
           export OBJCOPY=objcopy
           export NM=nm
           export HOSTCC=gcc
-          export HOSTLD=gcc
+          # 显式设置目标架构（关键！之前缺失）
+          [ "$ARCH" = "arm64" ] && export TARGET=aarch64-linux-gnu || export TARGET=arm-linux-gnueabihf
           
-          # 生成极简配置（彻底禁用模块相关干扰功能）
+          # 生成超极简配置（仅模块必需，其他全禁）
           make ARCH=$ARCH CC=$CC LD=$LD HOSTCC=$HOSTCC defconfig
           cat >> .config << EOF
-          # 模块核心功能（仅保留必需）
+          # 模块核心（仅这几个必需）
           CONFIG_MODULES=y
           CONFIG_MODULE_UNLOAD=y
           CONFIG_MODULE_FORCE_LOAD=y
           CONFIG_MODULE_SIG=n
-          CONFIG_MODULE_SIG_ALL=n
-          CONFIG_MODULE_SIG_FORCE=n
-          CONFIG_MODULE_SIG_HASH=n
           CONFIG_MODULE_COMPRESS=n
-          CONFIG_MODULE_DECOMPRESS=n
+          CONFIG_MODVERSIONS=n  # 彻底禁用模块版本检查，避免依赖 scripts/mod
+          CONFIG_MODULE_SRCVERSION_ALL=n
           CONFIG_MODULE_ALLOW_MISSING_NAMESPACE_IMPORTS=y
-          CONFIG_MODULES_TREE_LOOKUP=n
           
-          # 系统兼容
+          # 系统基础
           CONFIG_ANDROID=y
           CONFIG_RETPOLINE=y
-          CONFIG_MMU=y  # 确保 MMU 启用，避免模块编译依赖缺失
+          CONFIG_MMU=y
+          CONFIG_64BIT=$([ "$ARCH" = "arm64" ] && echo y || echo n)
           
           # LLVM 兼容
           CONFIG_LLVM=y
           CONFIG_LLVM_IAS=y
           
-          # 禁用所有非必要/不兼容功能
+          # 禁用所有其他功能
           CONFIG_STACKPROTECTOR=n
           CONFIG_DEBUG_INFO=n
           CONFIG_VDSO=n
-          CONFIG_VDSO32=n
-          CONFIG_COMPAT_VDSO=n
-          CONFIG_ARM64_VDSO=n
-          CONFIG_ARM64_COMPAT_VDSO=n
           CONFIG_ARM64_PTR_AUTH=n
           CONFIG_ARM64_BTI=n
           CONFIG_DEBUG_KERNEL=n
-          CONFIG_DEBUG_MISC=n
-          CONFIG_PROFILE=n
+          CONFIG_SECURITY=n
           CONFIG_TRACING=n
           CONFIG_KASAN=n
           CONFIG_KCSAN=n
-          CONFIG_SECURITY=n  # 禁用安全模块，避免干扰
           CONFIG_SIGNED_MODULES=n
+          CONFIG_COMPAT=n  # 禁用兼容模式，减少依赖
           EOF
-          # 应用配置（单线程，避免冲突）
           make ARCH=$ARCH CC=$CC LD=$LD HOSTCC=$HOSTCC oldconfig -j1 > /dev/null 2>&1
           
-          echo "✅ 内核配置完成！"
+          echo "✅ 超极简内核配置完成！"
           cd ..
 
-      - name: 手动编译 scripts/mod（解决 empty.o 失败）
+      - name: 编译 scripts/mod 必需文件（精准编译，不冗余）
         run: |
           ARCH=${{ github.event.inputs.kernel_arch }}
           cd ./kernel-src
           
-          # 工具链配置
+          # 工具链配置（显式指定目标架构）
           export CC=clang
           export LD=ld.lld
           export OBJCOPY=objcopy
           export NM=nm
           export HOSTCC=gcc
+          [ "$ARCH" = "arm64" ] && { export TARGET=aarch64-linux-gnu; export CFLAGS="-target aarch64-linux-gnu"; } || { export TARGET=arm-linux-gnueabihf; export CFLAGS="-target arm-linux-gnueabihf"; }
           
-          # 手动编译 scripts/mod 目录，添加强制兼容参数
-          make ARCH=$ARCH CC=$CC LD=$LD HOSTCC=$HOSTCC -C scripts/mod \
-            CFLAGS="-mgeneral-regs-only -fno-asynchronous-unwind-tables -fno-unwind-tables -w -O2" \
-            -j1 2>/dev/null || { echo "❌ scripts/mod 编译失败！"; exit 1; }
+          # 精准编译 scripts/mod 必需文件（empty.o + modpost 核心）
+          # 1. 编译 empty.o（模块模板文件）
+          $CC $CFLAGS -c scripts/mod/empty.c -o scripts/mod/empty.o \
+            -I./include -I./arch/$ARCH/include -I./include/generated \
+            -mgeneral-regs-only -fno-asynchronous-unwind-tables -fno-unwind-tables -w -O2
           
-          # 继续完成模块准备
-          make ARCH=$ARCH CC=$CC LD=$LD HOSTCC=$HOSTCC modules_prepare -j1 2>/dev/null
+          # 2. 编译 modpost 相关（模块符号处理，必需）
+          HOSTCC=gcc $HOSTCC -c scripts/mod/modpost.c -o scripts/mod/modpost.o \
+            -I./include -w -O2
+          HOSTCC=gcc $HOSTCC -c scripts/mod/file2alias.c -o scripts/mod/file2alias.o \
+            -I./include -w -O2
+          HOSTCC=gcc $HOSTCC -c scripts/mod/sumversion.c -o scripts/mod/sumversion.o \
+            -I./include -w -O2
+          HOSTCC=gcc $HOSTCC scripts/mod/modpost.o scripts/mod/file2alias.o scripts/mod/sumversion.o -o scripts/mod/modpost
+          
+          # 3. 生成模块链接脚本
+          make ARCH=$ARCH CC=$CC LD=$LD HOSTCC=$HOSTCC scripts/module.lds -j1 2>/dev/null
+          
+          # 4. 完成模块准备
           make ARCH=$ARCH CC=$CC LD=$LD HOSTCC=$HOSTCC include/generated/asm-offsets.h -j1 2>/dev/null
           
           chmod -R 777 ./scripts/mod ./include
-          echo "✅ scripts/mod 编译成功！模块环境准备完成！"
+          echo "✅ scripts/mod 必需文件编译成功！"
           cd ..
 
-      - name: 编译 HMA++ KPM 模块（最终构建）
+      - name: 编译 HMA++ KPM 模块（终极构建）
         run: |
           export KERNELDIR=$(pwd)/kernel-src
           export ARCH=${{ github.event.inputs.kernel_arch }}
           
-          # 工具链配置
+          # 工具链配置（显式目标架构）
           export CC=clang
           export LD=ld.lld
           export OBJCOPY=objcopy
           export NM=nm
           export HOSTCC=gcc
+          [ "$ARCH" = "arm64" ] && export EXTRA_CFLAGS="-target aarch64-linux-gnu" || export EXTRA_CFLAGS="-target arm-linux-gnueabihf"
           
-          # 目标架构兼容参数（极简+强制）
-          if [ "$ARCH" = "arm64" ]; then
-            export EXTRA_CFLAGS="-I$KERNELDIR/include -I$KERNELDIR/include/linux -I$(pwd)/kernel-headers -I$KERNELDIR/arch/arm64/include/generated -Wall -O2 -fPIC -w -DKERNEL_5_15 -fno-pie -nostdinc -march=armv8-a -mgeneral-regs-only -fno-asynchronous-unwind-tables -fno-unwind-tables -mno-unaligned-access"
-          else
-            export EXTRA_CFLAGS="-I$KERNELDIR/include -I$KERNELDIR/include/linux -I$(pwd)/kernel-headers -I$KERNELDIR/arch/arm/include/generated -Wall -O2 -fPIC -w -DKERNEL_5_15 -fno-pie -nostdinc -march=armv7-a -mgeneral-regs-only -fno-asynchronous-unwind-tables -fno-unwind-tables -mno-unaligned-access"
-          fi
+          # 核心编译参数（极简+明确）
+          export EXTRA_CFLAGS="$EXTRA_CFLAGS -I$KERNELDIR/include -I$KERNELDIR/include/linux -I$(pwd)/kernel-headers -I$KERNELDIR/arch/$ARCH/include/generated -Wall -O2 -fPIC -w -DKERNEL_5_15 -fno-pie -nostdinc -mgeneral-regs-only -fno-asynchronous-unwind-tables -fno-unwind-tables"
           
           chmod 777 ./Makefile
           make clean || true
-          # 单线程编译，显式传递所有参数
+          # 终极编译（显式所有参数）
           make -j1 V=1 CC=$CC LD=$LD OBJCOPY=$OBJCOPY NM=$NM HOSTCC=$HOSTCC EXTRA_CFLAGS="$EXTRA_CFLAGS" || { echo "❌ 模块编译失败！"; exit 1; }
           
-          # 验证模块生成
+          # 验证模块
           if [ -f "./HMA++.ko" ]; then
             echo "🎉 HMA++ KPM 模块编译成功！"
             ls -la ./HMA++.ko
             file ./HMA++.ko
           else
-            echo "❌ 模块文件未生成！"
+            echo "❌ 模块未生成！"
             exit 1
           fi
           chmod 777 ./HMA++.ko
