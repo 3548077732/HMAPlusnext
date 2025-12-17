@@ -112,6 +112,43 @@ static const char *risk_whitelist[] = {
     "com.modify.installer",     // 修改安装器（解除原风险拦截）
     "me.bingyue.IceCore",       // IceCore（解除原风险拦截）
     "com.silverlab.app.deviceidchanger.free" // 设备ID修改器（解除原风险拦截）
+     "com.tencent.mm",          // 微信
+    "com.tencent.mobileqq",    // QQ
+    "com.tencent.minihd.qq",   // QQ轻量版
+    "com.tencent.wework",      // 企业微信
+    // 系统基础软件
+    "com.android.systemui",    // 系统UI
+    "com.android.settings",    // 设置
+    "com.android.phone",       // 电话
+    "com.android.contacts",    // 联系人
+    "com.android.mms",         // 短信
+    "com.android.launcher3",   // 桌面启动器（通用）
+    "com.android.packageinstaller", // 应用安装器
+    // 常用银行软件
+    "com.icbc.mobilebank",     // 工商银行
+    "com.ccb.ccbphone",        // 建设银行
+    "com.abchina.mobilebank",  // 农业银行
+    "com.cmbchina.psbc",       // 邮储银行
+    "com.cmbchina",            // 招商银行
+    "com.bankcomm",            // 交通银行
+    "com.spdb.mobilebank",     // 浦发银行
+    "com.hxb.android",         // 华夏银行
+    "com.cib.mobilebank",      // 兴业银行
+    "com.pingan.bank",         // 平安银行
+    "com.abcwealth.mobile",    // 农业银行财富版
+    "com.eg.android.AlipayGphone", // 支付宝（金融类）
+    "com.unionpay",            // 银联
+    // 厂商系统应用（兼容主流品牌）
+    "com.xiaomi.misettings",   // 小米设置
+    "com.huawei.systemmanager",// 华为系统管家
+    "com.oppo.launcher",       // OPPO桌面
+    "com.vivo.launcher",       // VIVO桌面
+    "com.samsung.android.launcher", // 三星桌面
+    "com.meizu.flyme.launcher", // 魅族桌面
+    "me.bmax.apatch",
+    "com.larus.nova",
+    "com.miui.home",
+    "com.sukisu.ultra"
 };
 #define RISK_WHITELIST_SIZE (sizeof(risk_whitelist)/sizeof(risk_whitelist[0]))
 
@@ -424,9 +461,14 @@ out_copy:
 }
 
 // 广告拦截控制（仅控制广告开关，独立）
-// 参数：2=开启广告拦截，3=关闭广告拦截
-static long hma_control1(const char *args, char *__user out_msg, int outlen) {
+// 适配 KPM_CTL1 接口类型：long (*)(void *, void *, void *)
+// 参数映射：a1=输入参数（const char*）, a2=输出缓冲区（char* __user）, a3=输出长度（int）
+static long hma_control1(void *a1, void *a2, void *a3) {
+    const char *args = (const char *)a1;
+    char *__user out_msg = (char *__user)a2;
+    int outlen = (int)(unsigned long)a3;
     char msg[64] = {0};
+
     if (!args || strlen(args) != 1) { // 仅接受单个字符参数
         strncpy(msg, "参数错误：广告拦截仅支持 2(开启) 或 3(关闭)", sizeof(msg)-1);
         goto out_copy;
@@ -447,7 +489,7 @@ static long hma_control1(const char *args, char *__user out_msg, int outlen) {
     }
 
 out_copy:
-    if (outlen >= strlen(msg) + 1) {
+    if (out_msg && outlen >= strlen(msg) + 1) {
         compat_copy_to_user(out_msg, msg, strlen(msg) + 1);
     }
     return 0;
