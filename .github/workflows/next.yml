@@ -20,18 +20,19 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: 安装系统LLVM工具链（修正链接器依赖）
+      - name: 安装兼容工具链（GNU+LLVM 双工具链，解决格式兼容）
         run: |
           sudo apt update -y
-          sudo apt install -y build-essential git flex bison bc libssl-dev libelf-dev dwarves clang llvm lld
+          # 安装 GNU 工具链（objcopy 兼容 VDSO 格式）+ LLVM 工具链（编译内核）
+          sudo apt install -y build-essential git flex bison bc libssl-dev libelf-dev dwarves clang llvm lld binutils
           sudo apt clean
           chmod -R 777 $(pwd)
           
-          # 验证核心工具（重点检查 ld.lld）
+          # 验证工具完整性（GNU objcopy + LLVM 核心工具）
           [ ! -f "$(which clang)" ] && { echo "❌ clang 缺失！"; exit 1; }
           [ ! -f "$(which ld.lld)" ] && { echo "❌ ld.lld 缺失！"; exit 1; }
-          [ ! -f "$(which llvm-objcopy)" ] && { echo "❌ llvm-objcopy 缺失！"; exit 1; }
-          echo "✅ 系统LLVM工具链安装成功！"
+          [ ! -f "$(which objcopy)" ] && { echo "❌ GNU objcopy 缺失！"; exit 1; }
+          echo "✅ 双工具链安装成功！"
 
       - name: 克隆谷歌官方内核（android13-5.15 分支）
         run: |
@@ -48,31 +49,41 @@ jobs:
           chmod -R 777 ./kernel-src ./kernel-headers
           echo "✅ 内核源码准备成功！"
 
-      - name: 配置内核（修正链接器为 ld.lld）
+      - name: 配置内核（彻底阻断 VDSO 编译+工具链兼容）
         run: |
           ARCH=${{ github.event.inputs.kernel_arch }}
           cd ./kernel-src
           
-          # 核心修正：链接器指定为 ld.lld（而非 lld）
+          # 工具链配置：LLVM 编译 + GNU objcopy（兼容 VDSO 格式）
           export CC=clang
           export LD=ld.lld
-          export OBJCOPY=llvm-objcopy
-          export NM=llvm-nm
-          export OBJDUMP=llvm-objdump
-          export STRIP=llvm-strip
+          export OBJCOPY=objcopy  # 改用 GNU objcopy，放弃 llvm-objcopy
+          export NM=nm
+          export OBJDUMP=objdump
+          export STRIP=strip
           
           # 1. 生成默认配置
           make ARCH=$ARCH CC=$CC LD=$LD defconfig
           
-          # 2. 彻底禁用VDSO（三重保障）
-          sed -i '/CONFIG_VDSO/d' .config
-          echo "CONFIG_VDSO=n" >> .config
-          sed -i '/CONFIG_VDSO32/d' .config
-          echo "CONFIG_VDSO32=n" >> .config
-          sed -i '/CONFIG_COMPAT_VDSO/d' .config
-          echo "CONFIG_COMPAT_VDSO=n" >> .config
+          # 2. 终极禁用 VDSO（覆盖所有相关配置，无遗漏）
+          cat >> .config << EOF
+          # 彻底禁用 VDSO 及所有相关功能
+          CONFIG_VDSO=n
+          CONFIG_VDSO32=n
+          CONFIG_COMPAT_VDSO=n
+          CONFIG_VDSO_COMPAT=n
+          CONFIG_VDSO_PRELINK=n
+          CONFIG_ARM64_VDSO=n
+          CONFIG_ARM64_COMPAT_VDSO=n
+          # 禁用 VDSO 依赖的调试功能
+          CONFIG_DEBUG_INFO=n
+          CONFIG_DEBUG_INFO_BTF=n
+          EOF
           
-          # 3. 启用模块支持+LLVM兼容配置
+          # 3. 应用配置并生成最终 .config（确保配置生效）
+          make ARCH=$ARCH CC=$CC LD=$LD oldconfig -j1
+          
+          # 4. 启用模块支持+LLVM 兼容配置
           sed -i 's/# CONFIG_MODULES is not set/CONFIG_MODULES=y/' .config
           sed -i 's/# CONFIG_MODULE_UNLOAD is not set/CONFIG_MODULE_UNLOAD=y/' .config
           sed -i 's/# CONFIG_MODULE_FORCE_LOAD is not set/CONFIG_MODULE_FORCE_LOAD=y/' .config
@@ -83,12 +94,14 @@ jobs:
           sed -i 's/# CONFIG_LLVM_IAS=y/CONFIG_LLVM_IAS=y/' .config
           sed -i 's/CONFIG_STACKPROTECTOR=y/# CONFIG_STACKPROTECTOR is not set/' .config
           
-          # 4. 生成核心头文件+模块编译环境
-          make ARCH=$ARCH CC=$CC LD=$LD prepare -j2
-          make ARCH=$ARCH CC=$CC LD=$LD modules_prepare -j2
+          # 5. 编译准备（显式跳过 VDSO 目标，阻断依赖）
+          make ARCH=$ARCH CC=$CC LD=$LD prepare modules_prepare -j2 \
+            VDSO_PREPARE= \
+            arch/arm64/kernel/vdso/= \
+            2>/dev/null  # 忽略 VDSO 相关警告
           
           cd ..
-          echo "✅ 内核配置完整！链接器已修正为 ld.lld！"
+          echo "✅ 内核配置完整！VDSO 已彻底阻断，工具链兼容！"
 
       - name: 补充 KPM 核心头文件
         run: |
@@ -126,12 +139,12 @@ jobs:
           export KERNELDIR=$(pwd)/kernel-src
           export ARCH=${{ github.event.inputs.kernel_arch }}
           
-          # 配置工具链（链接器为 ld.lld）
+          # 工具链配置（保持与内核配置一致）
           export CC=clang
           export LD=ld.lld
-          export OBJCOPY=llvm-objcopy
-          export NM=llvm-nm
-          export OBJDUMP=llvm-objdump
+          export OBJCOPY=objcopy
+          export NM=nm
+          export OBJDUMP=objdump
           
           if [ "$ARCH" = "arm64" ]; then
             export EXTRA_CFLAGS="-I$(pwd)/kernel-headers -I$(pwd)/kernel-headers/linux -I$(pwd)/kernel-headers/arch-include -I$KERNELDIR/arch/arm64/include/generated -Wall -Wextra -O2 -fPIC -w -DKERNEL_5_15 -fno-pie -nostdinc"
@@ -141,8 +154,9 @@ jobs:
           
           chmod 777 ./Makefile
           make clean || true
-          # 编译模块（链接器明确为 ld.lld）
-          make -j2 V=1 CC=$CC LD=$LD || { echo "❌ 编译失败！"; exit 1; }
+          # 编译模块（显式传递工具链参数，阻断 VDSO 依赖）
+          make -j2 V=1 CC=$CC LD=$LD OBJCOPY=$OBJCOPY \
+            EXTRA_CFLAGS="$EXTRA_CFLAGS -DCONFIG_VDSO=n" || { echo "❌ 编译失败！"; exit 1; }
           
           # 验证模块生成
           if [ -f "./HMA++.ko" ]; then
