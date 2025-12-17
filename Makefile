@@ -1,39 +1,19 @@
-TARGET_COMPILE=./arm-gnu-toolchain-14.2.rel1-x86_64-aarch64-none-elf/bin/aarch64-none-elf-
-KP_DIR = ./KernelPatch
+# Apatch KPM编译配置（内核5.15+）
+obj-m += HMA++.o
+KERNELDIR ?= /usr/src/linux-headers-$(shell uname -r)
+CROSS_COMPILE ?= aarch64-linux-android-
+ARCH ?= arm64
+EXTRA_CFLAGS += -Wall -Wextra -DKERNEL_5_15_PLUS
 
-CC = $(TARGET_COMPILE)gcc
-LD = $(TARGET_COMPILE)ld
+# 强制指定头文件路径（解决缺失问题）
+EXTRA_CFLAGS += -I$(PWD) -I$(KERNELDIR)/include -I$(KERNELDIR)/arch/arm64/include
 
-INCLUDE_DIRS := . include patch/include linux/include linux/arch/arm64/include linux/tools/arch/arm64/include
+all:
+    $(MAKE) -j$(nproc) -C $(KERNELDIR) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) EXTRA_CFLAGS="$(EXTRA_CFLAGS)" M=$(PWD) modules
 
-INCLUDE_FLAGS := $(foreach dir,$(INCLUDE_DIRS),-I$(KP_DIR)/kernel/$(dir))
-
-CFLAGS = -I$(AP_INCLUDE_PATH) $(INCLUDE_FLAGS) -Wall -Ofast -fno-PIC -fno-asynchronous-unwind-tables -fno-stack-protector -fno-unwind-tables -fno-semantic-interposition -U_FORTIFY_SOURCE -fno-common -fvisibility=hidden
-
-objs := HMA++.o
-
-all: HMA++.kpm
-
-HMA++.kpm: ${objs}
-	${CC} -r -o $@ $^
-
-%.o: %.c
-	${CC} $(CFLAGS) $(INCLUDE_FLAGS) -c -O2 -o $@ $<
-
-.PHONY: clean
 clean:
-	rm -rf *.kpm
-	find . -name "*.o" | xargs rm -f
-	kpm pack \
-		--name $(shell grep KPM_NAME HMA++.c | awk -F '"' '{print $$2}') \
-		--version $(shell grep KPM_VERSION HMA++.c | awk -F '"' '{print $$2}') \
-		--author $(shell grep KPM_AUTHOR HMA++.c | awk -F '"' '{print $$2}') \
-		--license $(shell grep KPM_LICENSE HMA++.c | awk -F '"' '{print $$2}') \
-		--description $(shell grep KPM_DESCRIPTION HMA++.c | awk -F '"' '{print $$2}') \
-		--input HMA_Next.ko \
-		--output HMA++.kpm  # 产物名与源码名保持一致，避免混淆
-	# 第四步：校验 KPM 产物是否生成
-	if [ ! -f "HMA++.kpm" ]; then \
+    $(MAKE) -C $(KERNELDIR) ARCH=$(ARCH) M=$(PWD) clean
+    rm -rf *.ko *.mod.* *.symvers *.order .tmp_versions
 		echo "❌ 错误：KPM 打包失败，未生成 HMA++.kpm"; \
 		exit 1; \
 	fi
