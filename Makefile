@@ -1,15 +1,11 @@
 # HMA++ Next KPM Module Makefile
 # Author: NightFallsLikeRain
-# 适配 Apatch KPM + Android 5.15+ 内核 + NDK r25c
+# 适配单源码文件 HMA++.c + Apatch KPM + Android 5.15+ 内核
 
-# 模块名称（必须与最终生成的 .ko 文件名一致）
+# 模块名称（与源码文件 HMA++.c 对应，生成 HMA++.ko）
 obj-m += HMA++.o
 
-# 模块依赖源码文件（根据你的实际源码调整，比如 main.c、whitelist.c 等）
-# 格式：模块名-objs := 源文件1.o 源文件2.o ...（无需写 .c 后缀）
-HMA++-objs := main.o whitelist.o file_intercept.o ad_block.o
-
-# 编译规则（命令前必须是 Tab 键，不能用空格！）
+# 编译规则（命令前必须是 Tab 键，不可用空格！）
 all:
 	$(MAKE) -C $(KERNELDIR) M=$(PWD) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) modules
 
