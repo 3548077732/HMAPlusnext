@@ -20,10 +20,11 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: 安装最小化工具链
+      - name: 安装完整工具链（GCC+LLVM 双兼容）
         run: |
           sudo apt update -y
-          sudo apt install -y build-essential git flex bison bc libssl-dev libelf-dev dwarves clang llvm lld binutils
+          # 同时安装 GCC（主机工具）和 LLVM（目标架构编译）
+          sudo apt install -y build-essential git flex bison bc libssl-dev libelf-dev dwarves clang llvm lld binutils gcc
           sudo apt clean
           chmod -R 777 $(pwd)
 
@@ -33,16 +34,16 @@ jobs:
           git clone --depth 1 -b android13-5.15 https://android.googlesource.com/kernel/common.git ./kernel-src
           [ ! -f "./kernel-src/Makefile" ] && { echo "❌ 内核源码克隆失败！"; exit 1; }
           
-          # 复制基础头文件+权限设置
+          # 全目录权限+复制头文件
           ARCH=${{ github.event.inputs.kernel_arch }}
           cp -r ./kernel-src/include ./kernel-headers/
           [ "$ARCH" = "arm64" ] && [ -d "./kernel-src/arch/arm64/include" ] && cp -r ./kernel-src/arch/arm64/include ./kernel-headers/arch-include
           [ "$ARCH" = "arm" ] && [ -d "./kernel-src/arch/arm/include" ] && cp -r ./kernel-src/arch/arm/include ./kernel-headers/arch-include
-          chmod -R 777 ./kernel-src/include ./kernel-src/arch
+          chmod -R 777 ./kernel-src  # 递归开放所有权限，避免隐藏权限问题
           
           echo "✅ 内核源码准备成功！"
 
-      - name: 修改内核 Makefile，剥离 VDSO+禁用不兼容参数
+      - name: 修改内核 Makefile，剥离 VDSO+兼容配置
         run: |
           ARCH=${{ github.event.inputs.kernel_arch }}
           cd ./kernel-src
@@ -60,15 +61,15 @@ jobs:
           sed -i '/VDSO/d' Makefile
           sed -i '/vdso/d' Makefile
           
-          # 2. 禁用 mbranch-protection（LLVM 不兼容）
+          # 2. 禁用不兼容参数
           sed -i 's/-mbranch-protection=pac-ret+leaf+bti//g' arch/$ARCH/Makefile
-          sed -i 's/-Wa,-march//g' arch/$ARCH/Makefile  # 移除截断的参数
+          sed -i 's/-Wa,-march//g' arch/$ARCH/Makefile
           
           chmod -R 777 ./arch ./Makefile
-          echo "✅ VDSO 剥离+不兼容参数禁用完成！"
+          echo "✅ VDSO 剥离+参数兼容完成！"
           cd ..
 
-      - name: 补充 kpm.h 并双重复制+强制验证
+      - name: 补充 kpm.h 并双重复制+验证
         run: |
           # 生成 kpm.h
           cat > ./kpm.h << EOF
@@ -100,34 +101,45 @@ jobs:
           # 双重复制+验证
           cp -f ./kpm.h ./kernel-src/include/
           cp -f ./kpm.h ./kernel-src/include/linux/
-          if [ ! -f "./kernel-src/include/kpm.h" ] || [ ! -f "./kernel-src/include/linux/kpm.h" ]; then
-            echo "❌ kpm.h 复制失败！"; exit 1;
-          fi
+          [ ! -f "./kernel-src/include/kpm.h" ] && { echo "❌ kpm.h 复制失败！"; exit 1; }
           chmod 777 ./kernel-src/include/kpm.h ./kernel-src/include/linux/kpm.h
           
           echo "✅ kpm.h 准备完成！"
 
-      - name: 配置内核（禁用不兼容选项）
+      - name: 配置内核（HOSTCC=gcc+极简配置）
         run: |
           ARCH=${{ github.event.inputs.kernel_arch }}
           cd ./kernel-src
           
+          # 核心：目标架构用 LLVM，主机工具用 GCC（兼容 scripts/mod）
           export CC=clang
           export LD=ld.lld
           export OBJCOPY=objcopy
           export NM=nm
+          export HOSTCC=gcc  # 显式指定主机工具链为 GCC
+          export HOSTLD=gcc
           
-          # 生成配置+禁用不兼容功能
-          make ARCH=$ARCH CC=$CC LD=$LD defconfig
+          # 生成极简配置（仅保留模块必需功能，禁用所有非必要选项）
+          make ARCH=$ARCH CC=$CC LD=$LD HOSTCC=$HOSTCC defconfig
           cat >> .config << EOF
+          # 模块核心功能
           CONFIG_MODULES=y
           CONFIG_MODULE_UNLOAD=y
           CONFIG_MODULE_FORCE_LOAD=y
-          CONFIG_ANDROID=y
           CONFIG_MODULE_SIG=n
+          CONFIG_MODULE_SIG_ALL=n
+          CONFIG_MODULE_COMPRESS=n
+          CONFIG_MODULE_ALLOW_MISSING_NAMESPACE_IMPORTS=y
+          
+          # 系统兼容
+          CONFIG_ANDROID=y
+          CONFIG_RETPOLINE=y
+          
+          # LLVM 兼容
           CONFIG_LLVM=y
           CONFIG_LLVM_IAS=y
-          CONFIG_RETPOLINE=y
+          
+          # 禁用所有不兼容/非必要功能
           CONFIG_STACKPROTECTOR=n
           CONFIG_DEBUG_INFO=n
           CONFIG_VDSO=n
@@ -135,41 +147,49 @@ jobs:
           CONFIG_COMPAT_VDSO=n
           CONFIG_ARM64_VDSO=n
           CONFIG_ARM64_COMPAT_VDSO=n
-          CONFIG_ARM64_PTR_AUTH=n  # 禁用 PAC 功能，避免 mbranch-protection 依赖
-          CONFIG_ARM64_BTI=n       # 禁用 BTI 功能，避免不兼容参数
+          CONFIG_ARM64_PTR_AUTH=n
+          CONFIG_ARM64_BTI=n
+          CONFIG_DEBUG_KERNEL=n
+          CONFIG_DEBUG_MISC=n
+          CONFIG_PROFILE=n
+          CONFIG_TRACING=n
+          CONFIG_KASAN=n
+          CONFIG_KCSAN=n
           EOF
-          make ARCH=$ARCH CC=$CC LD=$LD oldconfig -j1 > /dev/null 2>&1
+          # 应用配置（单线程，避免冲突）
+          make ARCH=$ARCH CC=$CC LD=$LD HOSTCC=$HOSTCC oldconfig -j1 > /dev/null 2>&1
           
-          # 准备模块环境
-          make ARCH=$ARCH CC=$CC LD=$LD modules_prepare -j2 2>/dev/null
-          make ARCH=$ARCH CC=$CC LD=$LD include/generated/asm-offsets.h -j2 2>/dev/null
-          chmod -R 777 ./include/generated
+          # 准备模块环境（显式指定 HOSTCC）
+          make ARCH=$ARCH CC=$CC LD=$LD HOSTCC=$HOSTCC modules_prepare -j1 2>/dev/null
+          make ARCH=$ARCH CC=$CC LD=$LD HOSTCC=$HOSTCC include/generated/asm-offsets.h -j1 2>/dev/null
           
+          chmod -R 777 ./include ./scripts  # 确保 scripts 目录可写
           cd ..
-          echo "✅ 内核配置完成！"
+          echo "✅ 内核配置完成！HOST 工具链用 GCC 兼容！"
 
-      - name: 编译 HMA++ KPM 模块（完整参数+架构指定）
+      - name: 编译 HMA++ KPM 模块（单线程+完整参数）
         run: |
           export KERNELDIR=$(pwd)/kernel-src
           export ARCH=${{ github.event.inputs.kernel_arch }}
           
-          # 工具链配置+完整参数传递
+          # 工具链配置（目标 LLVM + 主机 GCC）
           export CC=clang
           export LD=ld.lld
           export OBJCOPY=objcopy
           export NM=nm
+          export HOSTCC=gcc
           
+          # 目标架构参数（极简+兼容）
           if [ "$ARCH" = "arm64" ]; then
-            # 手动指定 -march=armv8-a（兼容 LLVM）+ 禁用不兼容选项+完整参数
-            export EXTRA_CFLAGS="-I$KERNELDIR/include -I$KERNELDIR/include/linux -I$(pwd)/kernel-headers -I$KERNELDIR/arch/arm64/include/generated -Wall -Wextra -O2 -fPIC -w -DKERNEL_5_15 -fno-pie -nostdinc -DCONFIG_VDSO=n -march=armv8-a -mgeneral-regs-only -fno-asynchronous-unwind-tables -fno-unwind-tables"
+            export EXTRA_CFLAGS="-I$KERNELDIR/include -I$KERNELDIR/include/linux -I$(pwd)/kernel-headers -I$KERNELDIR/arch/arm64/include/generated -Wall -O2 -fPIC -w -DKERNEL_5_15 -fno-pie -nostdinc -march=armv8-a -mgeneral-regs-only"
           else
-            export EXTRA_CFLAGS="-I$KERNELDIR/include -I$KERNELDIR/include/linux -I$(pwd)/kernel-headers -I$KERNELDIR/arch/arm/include/generated -Wall -Wextra -O2 -fPIC -w -DKERNEL_5_15 -fno-pie -nostdinc -DCONFIG_VDSO=n -march=armv7-a -mgeneral-regs-only -fno-asynchronous-unwind-tables -fno-unwind-tables"
+            export EXTRA_CFLAGS="-I$KERNELDIR/include -I$KERNELDIR/include/linux -I$(pwd)/kernel-headers -I$KERNELDIR/arch/arm/include/generated -Wall -O2 -fPIC -w -DKERNEL_5_15 -fno-pie -nostdinc -march=armv7-a -mgeneral-regs-only"
           fi
           
           chmod 777 ./Makefile
           make clean || true
-          # 编译模块+强制打印完整命令（便于排查）
-          make -j1 V=1 CC=$CC LD=$LD OBJCOPY=$OBJCOPY EXTRA_CFLAGS="$EXTRA_CFLAGS" || { echo "❌ 编译失败！"; exit 1; }
+          # 单线程编译（避免并发冲突）+ 显式传递所有参数
+          make -j1 V=1 CC=$CC LD=$LD OBJCOPY=$OBJCOPY NM=$NM HOSTCC=$HOSTCC EXTRA_CFLAGS="$EXTRA_CFLAGS" || { echo "❌ 编译失败！"; exit 1; }
           
           # 验证模块生成
           if [ -f "./HMA++.ko" ]; then
